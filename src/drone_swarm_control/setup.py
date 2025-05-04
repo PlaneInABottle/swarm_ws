@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'core_drone_controller_node = drone_swarm_control.nodes.core_drone_controller_node:main',
         ],
     },
 )
