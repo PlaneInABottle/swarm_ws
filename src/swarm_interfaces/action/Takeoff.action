@@ -1,0 +1,12 @@
+# Goal definition
+float32 target_height # Target height relative to takeoff point (positive value expected, e.g., 5.0 for 5 meters up)
+float32 takeoff_velocity # Optional: Desired vertical velocity (m/s, positive up) - default if not provided
+---
+# Result definition
+bool success
+string message
+float32 final_height # Actual height reached (relative to takeoff point)
+---
+# Feedback definition
+float32 current_height # Current height relative to takeoff point
+float32 height_remaining # Estimated height remaining to target
