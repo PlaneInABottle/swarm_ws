@@ -20,7 +20,7 @@ from swarm_interfaces.action import Takeoff
 # This creates a dependency, consider moving InternalState to a common location if preferred
 try:
     # Adjust relative path if needed
-    from ..nodes.core_drone_controller_node import InternalState
+    from drone_swarm_control.utils.types import InternalState
 except ImportError:
     print("Could not import InternalState from core_drone_controller_node. Using dummy values.")
     # Define dummy enum if import fails to prevent NameError

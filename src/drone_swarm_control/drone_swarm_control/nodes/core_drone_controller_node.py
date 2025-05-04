@@ -16,6 +16,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from rclpy.duration import Duration
 
+import lifecycle_msgs.srv
+import lifecycle_msgs.msg
+
 # Import PX4 messages
 from px4_msgs.msg import (
     OffboardControlMode,
@@ -30,6 +33,7 @@ from px4_msgs.msg import (
 # Replace 'swarm_interfaces' with your actual interface package name
 from swarm_interfaces.action import Takeoff
 
+from drone_swarm_control.utils.types import InternalState
 # Import Handlers (assuming they are in ../handlers relative to this file)
 # Use try-except for imports if handlers are optional or might not exist initially
 try:
@@ -53,15 +57,6 @@ DEFAULT_HEARTBEAT_PERIOD = 0.1 # seconds (10 Hz) for OffboardControlMode
 SETPOINT_PUBLISH_PERIOD = 0.05 # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
 CONNECTION_TIMEOUT_SEC = 5.0  # Timeout for waiting for PX4 connection (status)
 
-
-class InternalState(Enum):
-    """ Defines the internal operational state of the CoreDroneController """
-    UNKNOWN = auto()          # Initial state before configuration
-    IDLE_ON_GROUND = auto()   # Configured, ready, but not armed/flying
-    ARMING = auto()           # Arm command sent, waiting for confirmation
-    IDLE_HOVERING = auto()    # Armed, flying, holding position, no action active
-    EXECUTING_ACTION = auto() # An action goal is being actively processed
-    # Consider adding: LANDING_AUTO, ERROR
 
 
 class CoreDroneController(LifecycleNode):
@@ -93,6 +88,7 @@ class CoreDroneController(LifecycleNode):
         self._vehicle_status: Optional[VehicleStatus] = None
         self._vehicle_local_position: Optional[VehicleLocalPosition] = None
         self._is_armed: bool = False # Derived from status
+        self._is_offboard: bool = False # Derived from status
         self._is_on_ground_approx: bool = True # Estimated from status/heuristics
 
         # Internal State Machine
@@ -184,6 +180,7 @@ class CoreDroneController(LifecycleNode):
         self._vehicle_status = None
         self._vehicle_local_position = None
         self._is_armed = False
+        self._is_offboard = False
         self._is_on_ground_approx = True
         self._desired_setpoint = None
         self._active_goal_handle = None
@@ -456,6 +453,7 @@ class CoreDroneController(LifecycleNode):
              self._vehicle_status = None
              self._vehicle_local_position = None
              self._is_armed = False
+             self._is_offboard = False
              self._is_on_ground_approx = True
              self._desired_setpoint = None
              self._active_goal_handle = None
@@ -466,45 +464,60 @@ class CoreDroneController(LifecycleNode):
     def _vehicle_status_callback(self, msg: VehicleStatus):
         """Stores status and updates internal flags and state machine."""
         if self._debug_logging:
-            self.get_logger().debug(f"Status: NAV={msg.nav_state}, ARM={msg.arming_state}, LAND_STATE={msg.landed_state}", throttle_duration_sec=5)
+            # Log relevant fields based on the provided definition
+            self.get_logger().debug(f"Status: NAV={msg.nav_state}, ARM={msg.arming_state}, HIL={msg.hil_state}, Failsafe={msg.failsafe}", throttle_duration_sec=5)
         self._vehicle_status = msg
         new_armed_state = (msg.arming_state == VehicleStatus.ARMING_STATE_ARMED)
+        new_offboard_state = (msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
 
-        # Update internal state if arming state changed while idle
-        # Use lock for safety as this callback runs in executor thread
+        # --- On-Ground Estimation Logic (Updated) ---
+        # Heuristic based ONLY on arming_state since landed_state is missing
+        new_on_ground_state = not new_armed_state # Assume ON_GROUND if DISARMED, IN_AIR if ARMED
+        if not hasattr(self, '_warned_missing_landed_state'): # Log warning only once
+             self.get_logger().warn("VehicleStatus message missing 'landed_state'. Estimating on_ground based SOLELY on arming state (DISARMED=GROUND, ARMED=AIR). This is less reliable.")
+             self._warned_missing_landed_state = True # Prevent repeated warnings
+        # --- End of Updated On-Ground Logic ---
+
+
+        # Update internal state machine based on changes (use lock for safety)
         with self._state_lock:
             current_internal_state = self._internal_state # Get state inside lock
+
+            # Update primary flags
             if new_armed_state != self._is_armed:
                 self.get_logger().info(f"Arming state changed: {self._is_armed} -> {new_armed_state}")
                 self._is_armed = new_armed_state
-                # Update state machine based on arm change only if IDLE
-                if current_internal_state == InternalState.IDLE_ON_GROUND and self._is_armed:
-                    self.get_logger().warn("Drone armed externally while in IDLE_ON_GROUND state. Transitioning to IDLE_HOVERING.")
-                    self._internal_state = InternalState.IDLE_HOVERING # Direct state update within lock
-                    self._update_desired_setpoint_to_hold() # Update hold state
-                elif current_internal_state == InternalState.IDLE_HOVERING and not self._is_armed:
-                    self.get_logger().warn("Drone disarmed externally while in IDLE_HOVERING state. Transitioning to IDLE_ON_GROUND.")
-                    self._internal_state = InternalState.IDLE_ON_GROUND # Direct state update within lock
-                    self._update_desired_setpoint_to_hold() # Update hold state
 
-            # Estimate if on ground and update state machine
-            if msg.landed_state == VehicleStatus.VEHICLE_LANDED_STATE_ON_GROUND:
-                if not self._is_on_ground_approx: # Log only on change
-                     self.get_logger().info("Landed state detected.")
-                self._is_on_ground_approx = True
-                if current_internal_state == InternalState.IDLE_HOVERING:
-                    self.get_logger().info("Transitioning to IDLE_ON_GROUND based on landed state.")
-                    self._internal_state = InternalState.IDLE_ON_GROUND
-                    self._update_desired_setpoint_to_hold()
-            elif msg.landed_state == VehicleStatus.VEHICLE_LANDED_STATE_IN_AIR:
-                if self._is_on_ground_approx: # Log only on change
-                     self.get_logger().info("In-air state detected.")
-                self._is_on_ground_approx = False
-                if current_internal_state == InternalState.IDLE_ON_GROUND and self.is_armed():
-                    self.get_logger().info("Transitioning to IDLE_HOVERING based on in-air state while armed.")
+            if new_offboard_state != self._is_offboard:
+                 self.get_logger().info(f"Offboard mode changed: {self._is_offboard} -> {new_offboard_state}")
+                 self._is_offboard = new_offboard_state
+                 # If we exited offboard unexpectedly while trying to execute/hover
+                 if not new_offboard_state and current_internal_state in [InternalState.IDLE_HOVERING, InternalState.EXECUTING_ACTION, InternalState.ARMING]:
+                      self.get_logger().error("Exited OFFBOARD mode unexpectedly! Transitioning to IDLE_HOVERING (will attempt hold).")
+                      # Force state change, hold_position will be commanded by timer default
+                      self._internal_state = InternalState.IDLE_HOVERING
+                      self._active_goal_handle = None # Clear active goal
+
+            if new_on_ground_state != self._is_on_ground_approx:
+                 self.get_logger().info(f"On-ground state changed (estimated): {self._is_on_ground_approx} -> {new_on_ground_state}")
+                 self._is_on_ground_approx = new_on_ground_state
+
+
+            # Update state machine based on combined flags (only if IDLE)
+            if current_internal_state in [InternalState.IDLE_ON_GROUND, InternalState.IDLE_HOVERING]:
+                if self._is_armed and not self._is_on_ground_approx and current_internal_state == InternalState.IDLE_ON_GROUND:
+                    self.get_logger().info("State change detected: Armed and In-Air -> IDLE_HOVERING")
                     self._internal_state = InternalState.IDLE_HOVERING
                     self._update_desired_setpoint_to_hold()
-            # else: Keep previous estimate if state is UNKNOWN/TAKEOFF/LANDING
+                elif not self._is_armed and self._is_on_ground_approx and current_internal_state == InternalState.IDLE_HOVERING:
+                    self.get_logger().info("State change detected: Disarmed and On-Ground -> IDLE_ON_GROUND")
+                    self._internal_state = InternalState.IDLE_ON_GROUND
+                    self._update_desired_setpoint_to_hold()
+                elif not self._is_armed and current_internal_state == InternalState.IDLE_HOVERING:
+                     # Disarmed while hovering? Transition to on_ground state
+                     self.get_logger().warn("Disarmed while IDLE_HOVERING. Transitioning to IDLE_ON_GROUND.")
+                     self._internal_state = InternalState.IDLE_ON_GROUND
+                     self._update_desired_setpoint_to_hold() # Command hold at last known pos
 
     def _vehicle_local_position_callback(self, msg: VehicleLocalPosition):
         """Stores the latest vehicle local position."""
@@ -636,29 +649,28 @@ class CoreDroneController(LifecycleNode):
          # It needs to access _vehicle_local_position (updated by sub callback)
          # and update _desired_setpoint (read by timer callback)
          # -> Use lock
-         with self._state_lock:
-             current_pos = self._vehicle_local_position # Read LPOS within lock
-             if current_pos is not None:
-                # Update the TrajectorySetpoint message for holding
-                if self._desired_setpoint is None:
-                    self._desired_setpoint = TrajectorySetpoint() # Create if doesn't exist
+         current_pos = self._vehicle_local_position # Read LPOS within lock
+         if current_pos is not None:
+            # Update the TrajectorySetpoint message for holding
+            if self._desired_setpoint is None:
+                self._desired_setpoint = TrajectorySetpoint() # Create if doesn't exist
 
-                self._desired_setpoint.position = [current_pos.x, current_pos.y, current_pos.z]
-                # Set velocities/accel/rates to NaN to ensure position control
-                self._desired_setpoint.velocity = [float('nan')] * 3
-                self._desired_setpoint.acceleration = [float('nan')] * 3
-                self._desired_setpoint.jerk = [float('nan')] * 3
-                # Hold current yaw if available, otherwise let PX4 control it
-                self._desired_setpoint.yaw = current_pos.heading if current_pos.heading_valid else float('nan')
-                self._desired_setpoint.yawspeed = float('nan')
-                if self._debug_logging:
-                    self.get_logger().debug(f"Desired setpoint updated to HOLD: N={current_pos.x:.2f}, E={current_pos.y:.2f}, D={current_pos.z:.2f}, Yaw={self._desired_setpoint.yaw:.2f}")
-                return True
-             else:
-                self.get_logger().warning("Cannot update desired setpoint to Hold: Current local position unknown.", throttle_duration_sec=2.0)
-                # Clear desired setpoint? Or leave previous? Clearing will trigger NaN publish.
-                # self._desired_setpoint = None # Setting to None triggers NaN publish in timer
-                return False
+            self._desired_setpoint.position = [current_pos.x, current_pos.y, current_pos.z]
+            # Set velocities/accel/rates to NaN to ensure position control
+            self._desired_setpoint.velocity = [float('nan')] * 3
+            self._desired_setpoint.acceleration = [float('nan')] * 3
+            self._desired_setpoint.jerk = [float('nan')] * 3
+            # Hold current yaw if available, otherwise let PX4 control it
+            self._desired_setpoint.yaw = current_pos.heading if current_pos.heading_good_for_control else float('nan')
+            self._desired_setpoint.yawspeed = float('nan')
+            if self._debug_logging:
+                self.get_logger().debug(f"Desired setpoint updated to HOLD: N={current_pos.x:.2f}, E={current_pos.y:.2f}, D={current_pos.z:.2f}, Yaw={self._desired_setpoint.yaw:.2f}")
+            return True
+         else:
+            self.get_logger().warning("Cannot update desired setpoint to Hold: Current local position unknown.", throttle_duration_sec=2.0)
+            # Clear desired setpoint? Or leave previous? Clearing will trigger NaN publish.
+            # self._desired_setpoint = None # Setting to None triggers NaN publish in timer
+            return False
 
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param3: float = 0.0, param4: float = 0.0, param5: float = 0.0, param6: float = 0.0, param7: float = 0.0) -> bool:
         """Helper to publish VehicleCommand. Assumes publisher exists."""
@@ -727,30 +739,49 @@ def main(args: Optional[list[str]] = None):
      executor: Optional[MultiThreadedExecutor] = None
      try:
          node = CoreDroneController()
-         # Use MultiThreadedExecutor for concurrent action/callback processing
          executor = MultiThreadedExecutor()
          executor.add_node(node)
 
          # Minimal manual transition for testing:
          node.get_logger().info("Attempting to configure node...")
-         node.trigger_configure()
-         # Spin briefly to allow configuration callbacks and status checks
-         executor.spin_once(timeout_sec=2.0)
-         if node.get_current_state().id == LifecycleState.PRIMARY_STATE_INACTIVE:
-              node.get_logger().info("Configuration successful, activating...")
-              node.trigger_activate()
-              # Spin briefly to allow activation callbacks
-              executor.spin_once(timeout_sec=1.0)
-              if node.get_current_state().id != LifecycleState.PRIMARY_STATE_ACTIVE:
-                   node.get_logger().error("Activation failed!")
-                   raise RuntimeError("Activation failed during startup.")
+         configure_result = node.trigger_configure() # Check return value
+         if configure_result == TransitionCallbackReturn.SUCCESS:
+              # Spin briefly to allow configuration callbacks and status checks
+              executor.spin_once(timeout_sec=1.0) # Spin AFTER triggering
+              # Now check the state using the service call method (more robust)
+              # This requires the node's services to be available
+              cli = node.create_client(lifecycle_msgs.srv.GetState, f'{node.get_name()}/get_state')
+              if not cli.wait_for_service(timeout_sec=2.0):
+                   node.get_logger().error("GetState service not available after configure.")
+                   raise RuntimeError("Could not verify node state.")
+              req = lifecycle_msgs.srv.GetState.Request()
+              future = cli.call_async(req)
+              rclpy.spin_until_future_complete(node, future, timeout_sec=2.0)
+              if not future.done() or future.result() is None:
+                   node.get_logger().error("Failed to get node state after configure.")
+                   raise RuntimeError("Could not verify node state.")
+
+              current_state_id = future.result().current_state.id
+              if current_state_id == lifecycle_msgs.msg.State.PRIMARY_STATE_INACTIVE:
+                   node.get_logger().info("Configuration successful (INACTIVE state confirmed), activating...")
+                   activate_result = node.trigger_activate()
+                   if activate_result == TransitionCallbackReturn.SUCCESS:
+                        executor.spin_once(timeout_sec=1.0) # Allow activate callbacks
+                        # Optionally verify active state here too using service call
+                   else:
+                        node.get_logger().error(f"Activation trigger failed! Result: {activate_result}")
+                        raise RuntimeError("Activation trigger failed during startup.")
+              else:
+                   # Configuration reported success via return code but state is not INACTIVE
+                   node.get_logger().error(f"Configuration trigger returned SUCCESS but node state is {current_state_id}, not INACTIVE.")
+                   raise RuntimeError("Inconsistent state after configuration.")
+              node.destroy_client(cli) # Clean up client
          else:
-              # Configuration failed, node might be UNCONFIGURED or FINALIZED
-              node.get_logger().error(f"Configuration failed, node state: {node.get_current_state().label}. Shutting down.")
-              raise RuntimeError("Configuration failed during startup.")
+              node.get_logger().error(f"Configuration trigger failed! Result: {configure_result}. Shutting down.")
+              raise RuntimeError("Configuration trigger failed during startup.")
 
          node.get_logger().info('Core Drone Controller spinning...')
-         executor.spin() # Keep spinning until shutdown requested
+         executor.spin()
 
      except KeyboardInterrupt:
          if node: node.get_logger().info('Keyboard interrupt, shutting down...')
@@ -763,38 +794,31 @@ def main(args: Optional[list[str]] = None):
          # Orderly shutdown
          if node and executor and rclpy.ok():
              node.get_logger().info('Initiating node shutdown sequence...')
+             # Simplified shutdown: just trigger transitions downwards
+             # Checking state during shutdown after errors can be unreliable
              try:
-                 # Gracefully transition down the lifecycle states
-                 current_state_id = node.get_current_state().id
-                 if current_state_id == LifecycleState.PRIMARY_STATE_ACTIVE:
-                     node.get_logger().info('Deactivating...')
-                     node.trigger_deactivate()
-                     executor.spin_once(timeout_sec=1.0) # Allow deactivate to run
-                     current_state_id = node.get_current_state().id
-
-                 if current_state_id == LifecycleState.PRIMARY_STATE_INACTIVE:
-                     node.get_logger().info('Cleaning up...')
-                     node.trigger_cleanup()
-                     executor.spin_once(timeout_sec=1.0) # Allow cleanup to run
-                     current_state_id = node.get_current_state().id
-
-                 if current_state_id == LifecycleState.PRIMARY_STATE_UNCONFIGURED:
-                      node.get_logger().info('Triggering final shutdown transition...')
-                      node.trigger_shutdown() # Calls on_shutdown -> on_cleanup
-                      executor.spin_once(timeout_sec=1.0) # Allow shutdown to run
-
+                 node.get_logger().info('Attempting Deactivate...')
+                 node.trigger_deactivate()
+                 executor.spin_once(timeout_sec=1.0)
              except Exception as e:
-                 node.get_logger().error(f"Error during lifecycle shutdown transitions: {e}")
-                 traceback.print_exc()
+                 node.get_logger().error(f"Error during deactivate trigger: {e}")
+             try:
+                 node.get_logger().info('Attempting Cleanup...')
+                 node.trigger_cleanup()
+                 executor.spin_once(timeout_sec=1.0)
+             except Exception as e:
+                 node.get_logger().error(f"Error during cleanup trigger: {e}")
+             try:
+                 node.get_logger().info('Attempting Shutdown...')
+                 node.trigger_shutdown()
+                 executor.spin_once(timeout_sec=1.0)
+             except Exception as e:
+                 node.get_logger().error(f"Error during shutdown trigger: {e}")
 
-             # Shutdown executor
+
              node.get_logger().info('Shutting down executor...')
              executor.shutdown()
-             # Node resources should be released by on_cleanup/on_shutdown
-             # destroy_node might not be needed if shutdown transition handles everything
-             # node.destroy_node() # Usually redundant if shutdown handles cleanup
 
-         # Shutdown rclpy
          if rclpy.ok():
              print('Shutting down RCLPY...')
              rclpy.shutdown()
