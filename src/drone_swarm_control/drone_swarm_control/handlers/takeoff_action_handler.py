@@ -4,7 +4,6 @@ import traceback
 import math
 from rclpy.action.server import GoalResponse, CancelResponse, ServerGoalHandle
 from rclpy.lifecycle import LifecycleState, LifecycleNode
-from rclpy.logging import Logger
 from rclpy.duration import Duration
 from typing import Type, Any, Optional
 
@@ -50,7 +49,7 @@ class TakeoffActionHandler(ActionHandlerBase):
     Interacts with the CoreDroneController's internal state machine.
     """
 
-    def __init__(self, parent_node: LifecycleNode, logger: Logger):
+    def __init__(self, parent_node: LifecycleNode, logger: Any):
         """
         Initialize the TakeoffActionHandler.
 

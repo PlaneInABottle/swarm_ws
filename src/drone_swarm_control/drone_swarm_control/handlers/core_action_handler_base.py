@@ -1,13 +1,14 @@
+# drone_swarm_control/handlers/action_handler_base.py
+
 import abc
 import rclpy
 import traceback
 from typing import Type, Any, Optional
 
 # Import specific rclpy types for hints
-from rclpy.action.server import ActionServer, GoalResponse, CancelResponse, ServerGoalHandle # Added ServerGoalHandle
+from rclpy.action.server import ActionServer, GoalResponse, CancelResponse, ServerGoalHandle
 from rclpy.callback_groups import CallbackGroup, ReentrantCallbackGroup
-from rclpy.lifecycle import LifecycleNode # Keep LifecycleNode as parent type
-from rclpy.logging import Logger
+from rclpy.lifecycle import LifecycleNode
 
 class ActionHandlerBase(abc.ABC):
     """
@@ -17,19 +18,20 @@ class ActionHandlerBase(abc.ABC):
     ROS 2 Action Server (e.g., Takeoff, Land, NavigateToPoint).
     """
 
-    def __init__(self, parent_node: LifecycleNode, logger: Logger, action_name: str, action_type: Type):
+    # Use 'Any' for the logger type hint as direct import failed
+    def __init__(self, parent_node: LifecycleNode, logger: Any, action_name: str, action_type: Type):
         """
         Initializes the base action handler.
 
         Args:
             parent_node: The ROS 2 LifecycleNode (typically CoreDroneController) that owns this handler.
                          Provides access to shared resources and methods like hold_position(), clock, etc.
-            logger: The logger instance from the parent node for consistent logging.
+            logger: The logger instance obtained from the parent node (e.g., parent_node.get_logger()).
             action_name: The name of the action server (e.g., 'takeoff', 'land').
             action_type: The type of the action definition (e.g., Takeoff, Land from interfaces).
         """
         self._parent_node = parent_node
-        self._logger = logger
+        self._logger = logger # Store the passed logger instance
         self._action_name = action_name
         self._action_type = action_type
         self._action_server: Optional[ActionServer] = None
@@ -39,8 +41,8 @@ class ActionHandlerBase(abc.ABC):
         self._is_started = False
 
     @property
-    def logger(self) -> Logger:
-        """Provides read-only access to the logger."""
+    def logger(self) -> Any: # Changed return type hint to Any
+        """Provides read-only access to the logger instance."""
         return self._logger
 
     @property
@@ -62,6 +64,7 @@ class ActionHandlerBase(abc.ABC):
             True if the server started successfully, False otherwise.
         """
         if self._action_server is not None:
+            # Use the stored logger instance
             self.logger.warn(f"[{self.__class__.__name__}] Action server '{self._action_name}' already started.")
             return True # Already started, consider it success
 
@@ -119,11 +122,6 @@ class ActionHandlerBase(abc.ABC):
         Returns:
             GoalResponse.ACCEPT or GoalResponse.REJECT.
         """
-        # Example Implementation Hint:
-        # Check self.parent_node.get_current_state().id
-        # Check self.parent_node.get_internal_state()
-        # Check drone status via self.parent_node methods (is_armed, is_on_ground)
-        # Validate goal_request parameters
         pass
 
     # Provide a default implementation which can be overridden if needed
@@ -154,12 +152,6 @@ class ActionHandlerBase(abc.ABC):
         Returns:
             CancelResponse.ACCEPT or CancelResponse.REJECT.
         """
-        # Example Implementation Hint:
-        # active_goal = self.parent_node.get_active_goal_handle()
-        # if active_goal and active_goal.goal_id == goal_handle.goal_id:
-        #     return CancelResponse.ACCEPT
-        # else:
-        #     return CancelResponse.REJECT
         pass
 
     @abc.abstractmethod
@@ -178,25 +170,4 @@ class ActionHandlerBase(abc.ABC):
         Returns:
             An instance of the action's Result message (e.g., Takeoff.Result()).
         """
-        # Example Implementation Hint (structure):
-        # try:
-        #     # ... Perform action steps ...
-        #     # Check goal_handle.is_cancel_requested periodically
-        #     # Publish feedback: goal_handle.publish_feedback(...)
-        #     # Update desired setpoint: self.parent_node.set_target_setpoint(...)
-        #     # ...
-        #     # On success:
-        #     self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Or appropriate idle state
-        #     goal_handle.succeed()
-        #     return YourAction.Result(...)
-        # except Exception as e:
-        #     # ... Log error ...
-        #     # Command safe state: self.parent_node.hold_position()
-        #     self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Or ERROR state
-        #     goal_handle.abort()
-        #     return YourAction.Result(...)
-        # finally:
-        #     # Cleanup specific to this handler's execution if needed
-        #     pass
         pass
-
