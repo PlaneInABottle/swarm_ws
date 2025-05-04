@@ -79,10 +79,6 @@ class TakeoffActionHandler(ActionHandlerBase):
             self.logger.error("Rejecting goal: Takeoff action server not started.")
             return GoalResponse.REJECT
 
-        # 2. Check if parent node is Active (Lifecycle State)
-        if self.parent_node.get_current_state().id != LifecycleState.PRIMARY_STATE_ACTIVE:
-            self.logger.error("Rejecting goal: Parent node is not in the ACTIVE state.")
-            return GoalResponse.REJECT
 
         # 3. Check parent node's Internal State
         current_internal_state = self.parent_node.get_internal_state()
@@ -124,7 +120,7 @@ class TakeoffActionHandler(ActionHandlerBase):
 
     def handle_accepted_callback(self, goal_handle: ServerGoalHandle) -> None:
         """ Start the asynchronous execution and update parent state. """
-        self.logger.info(f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id.uuid.hex}. Starting execution...")
+        self.logger.info(f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id}. Starting execution...")
         # Set parent state to ARMING (or EXECUTING_ACTION) before starting execution
         # Pass the goal handle so the parent knows which goal is active
         self.parent_node.set_internal_state(InternalState.ARMING, goal_handle)
@@ -132,14 +128,14 @@ class TakeoffActionHandler(ActionHandlerBase):
 
     def cancel_callback(self, goal_handle: ServerGoalHandle) -> CancelResponse:
         """ Handle cancellation requests. """
-        self.logger.info(f"[{self.__class__.__name__}] Received cancel request for goal {goal_handle.goal_id.uuid.hex}.")
+        self.logger.info(f"[{self.__class__.__name__}] Received cancel request for goal {goal_handle.goal_id}.")
         # Check if the goal being cancelled is the currently active one
         active_goal = self.parent_node.get_active_goal_handle()
         if active_goal and active_goal.goal_id == goal_handle.goal_id:
             self.logger.info("Accepting cancellation request for the active goal.")
             return CancelResponse.ACCEPT
         else:
-            self.logger.warn(f"Rejecting cancel request: Goal {goal_handle.goal_id.uuid.hex} is not the active goal.")
+            self.logger.warn(f"Rejecting cancel request: Goal {goal_handle.goal_id} is not the active goal.")
             return CancelResponse.REJECT
 
 
@@ -148,7 +144,7 @@ class TakeoffActionHandler(ActionHandlerBase):
         Executes the takeoff action: arm, ascend, monitor, stabilize.
         Updates parent state machine on completion/error/cancel.
         """
-        goal_id_str = goal_handle.goal_id.uuid.hex # Use hex for shorter log messages
+        goal_id_str = goal_handle.goal_id # Use hex for shorter log messages
         self.logger.info(f"[{self.__class__.__name__}] Executing goal {goal_id_str}...")
 
         request: Takeoff.Goal = goal_handle.request
@@ -178,7 +174,7 @@ class TakeoffActionHandler(ActionHandlerBase):
             # 4. Wait for armed confirmation (with timeout)
             arm_start_time = self.parent_node.get_clock().now()
             while not self.parent_node.is_armed():
-                if (self.parent_node.get_clock().now() - arm_start_time).nanoseconds / 1e9 > ARM_TIMEOUT_SEC:
+                if (self.parent_node.get_clock().now() - arm_start_time).nanoseconds / (2*1e9) > ARM_TIMEOUT_SEC:
                      raise TimeoutError(f"Timed out ({ARM_TIMEOUT_SEC}s) waiting for drone to arm.")
                 # Check for cancellation while waiting
                 if goal_handle.is_cancel_requested:
@@ -190,7 +186,7 @@ class TakeoffActionHandler(ActionHandlerBase):
                     result.message = "Takeoff canceled while waiting for arm."
                     result.final_height = 0.0
                     return result
-                await self.parent_node.get_clock().sleep_for(Duration(seconds=0.1))
+                self.parent_node.get_clock().sleep_for(Duration(seconds=0.1))
             self.logger.info(f"[{goal_id_str}] Drone is ARMED.")
             # Update state machine now that arming is confirmed
             self.parent_node.set_internal_state(InternalState.EXECUTING_ACTION, goal_handle)
