@@ -7,7 +7,7 @@ from typing import Type, Any, Optional
 
 # Import specific rclpy types for hints
 from rclpy.action.server import ActionServer, GoalResponse, CancelResponse, ServerGoalHandle
-from rclpy.callback_groups import CallbackGroup, ReentrantCallbackGroup
+from rclpy.callback_groups import CallbackGroup, MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.lifecycle import LifecycleNode
 
 class ActionHandlerBase(abc.ABC):
@@ -37,7 +37,7 @@ class ActionHandlerBase(abc.ABC):
         self._action_server: Optional[ActionServer] = None
         # Use a reentrant callback group to allow multiple goals potentially
         # or other callbacks within the node to run concurrently with the action execution.
-        self._callback_group: CallbackGroup = ReentrantCallbackGroup()
+        self._callback_group: CallbackGroup = MutuallyExclusiveCallbackGroup()
         self._is_started = False
 
     @property
@@ -55,7 +55,7 @@ class ActionHandlerBase(abc.ABC):
         """Returns True if the action server has been successfully started."""
         return self._is_started
 
-    def start(self) -> bool:
+    def start(self,callback_group: Optional[CallbackGroup] = None) -> bool:
         """
         Creates and initializes the ROS 2 Action Server for this handler.
         Should only be called once, typically during the parent node's configuration phase.

@@ -174,6 +174,7 @@ class TakeoffActionHandler(ActionHandlerBase):
             # 4. Wait for armed confirmation (with timeout)
             arm_start_time = self.parent_node.get_clock().now()
             while not self.parent_node.is_armed():
+                self.parent_node.arm()
                 if (self.parent_node.get_clock().now() - arm_start_time).nanoseconds / (2*1e9) > ARM_TIMEOUT_SEC:
                      raise TimeoutError(f"Timed out ({ARM_TIMEOUT_SEC}s) waiting for drone to arm.")
                 # Check for cancellation while waiting
@@ -199,7 +200,7 @@ class TakeoffActionHandler(ActionHandlerBase):
                  # This might fail if setpoint stream wasn't active long enough beforehand
                  raise RuntimeError("Failed to send engage offboard mode command.")
             # Allow a short time for mode switch confirmation if needed, or proceed
-            await self.parent_node.get_clock().sleep_for(Duration(seconds=0.2))
+            self.parent_node.get_clock().sleep_for(Duration(seconds=2))
             # Add check for self.parent_node.get_vehicle_status().nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD ?
 
 
@@ -247,7 +248,7 @@ class TakeoffActionHandler(ActionHandlerBase):
                 )
 
                 # ** Loop Sleep **
-                await self.parent_node.get_clock().sleep_for(Duration(seconds=0.1)) # Match controller rate?
+                self.parent_node.get_clock().sleep_for(Duration(seconds=0.2)) # Match controller rate?
 
             # --- Post-Ascent Stabilization ---
             self.logger.info(f"[{goal_id_str}] Stabilizing at target altitude...")
@@ -279,7 +280,7 @@ class TakeoffActionHandler(ActionHandlerBase):
                      # If pos lost here, maybe just keep sending target Z? Less ideal.
                      self.parent_node.set_target_setpoint(x=initial_x, y=initial_y, z=target_z_ned, yaw=float('nan'))
 
-                await self.parent_node.get_clock().sleep_for(Duration(seconds=0.1))
+                self.parent_node.get_clock().sleep_for(Duration(seconds=0.2))
 
             # --- Success ---
             self.logger.info(f"[{goal_id_str}] Takeoff successful and stabilized.")
