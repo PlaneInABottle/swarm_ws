@@ -7,6 +7,7 @@ from threading import Lock
 from typing import Dict, Optional, Type, Any, cast  # Added cast for type checking
 
 # Import specific rclpy types for hints
+from rclpy.client import Client
 from rclpy.publisher import Publisher
 from rclpy.subscription import Subscription
 from rclpy.timer import Timer
@@ -105,7 +106,7 @@ class CoreDroneController(LifecycleNode):
 
         # --- Service Clients ---
         # Change type later
-        self._vehicle_command_client: Any = None
+        self._vehicle_command_client: Optional[Client] = None
 
         # --- Action Handlers ---
         self._handlers: dict[str, ActionHandlerBase] = {}
