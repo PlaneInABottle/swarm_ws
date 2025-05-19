@@ -3,6 +3,7 @@ import time
 import asyncio
 import traceback
 import math
+import functools
 from rclpy.action.server import GoalResponse, CancelResponse, ServerGoalHandle
 from rclpy.lifecycle import LifecycleState, LifecycleNode
 from rclpy.duration import Duration
@@ -115,33 +116,30 @@ class TakeoffActionHandler(ActionHandlerBase):
         Executes the takeoff action: arm, ascend, monitor, stabilize.
         Updates parent state machine on completion/error/cancel.
         """
-        self.execute_future = Future()
-        self.feedback_timer = None
         result = Takeoff.Result()
         feedback = Takeoff.Feedback()
+        self.execute_future = Future()
 
-        def feedback_callback():
-            if self.is_started:
-                result = Takeoff.Result()
-                result.success = True
-                result.message = f"Error during takeoff"
-
-                result.final_height = 1.0
-                feedback.current_height += 1.0
-                feedback.height_remaining += 2.0
-                self.logger.info("Publishing Feedback")
-                goal_handle.publish_feedback(feedback)
-                if feedback.current_height >= 50:
-                    self.execute_future.set_result(None)
-                    self.feedback_timer.cancel()
-
-        self.feedback_timer_period = 0.5  # seconds (e.g., 2 Hz)
-        self.feedback_timer = self.parent_node.create_timer(
-            self.feedback_timer_period,
-            feedback_callback,
+        partial_callback = functools.partial(
+            self.execute_feedback_callback, feedback, goal_handle
+        )
+        self.execute_feedback_timer = self.parent_node.create_timer(
+            self.execute_timer_period,
+            partial_callback,
             callback_group=self._callback_group,  # Can be same or different CB group
         )
-        await self.execute_future
+        if self.execute_future is not None:
+            await self.execute_future
+        else:
+            result.success = False
+            result.message = f"Error during takeoff"
+            result.final_height = 1.0
+            # Be carefull about integer or float. 0.0 is float
+            goal_handle.canceled()
+            self.logger.info("Failed ")
+            return result
+
+        self.execute_future = None
 
         # Make Drone Offboard
         self.logger.info(f"Engaging Offboard Mode")
@@ -167,3 +165,17 @@ class TakeoffActionHandler(ActionHandlerBase):
 
         self.logger.info("Returning result")
         return result
+
+    async def execute_feedback_callback(self, feedback, goal_handle):
+        if self.is_started:
+            feedback.current_height += 1.0
+            feedback.height_remaining += 2.0
+            self.logger.info("Publishing Feedback")
+            goal_handle.publish_feedback(feedback)
+            if (
+                feedback.current_height >= 50
+                and self.execute_future is not None
+                and self.execute_feedback_timer is not None
+            ):
+                self.execute_future.set_result(None)
+                self.execute_feedback_timer.cancel()

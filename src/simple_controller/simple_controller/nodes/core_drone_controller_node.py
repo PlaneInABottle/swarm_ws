@@ -113,7 +113,6 @@ class CoreDroneController(LifecycleNode):
         # --- Callback Groups ---
         self._cbgroup = MutuallyExclusiveCallbackGroup()
         self._action_handler_cbgroup = MutuallyExclusiveCallbackGroup()
-        self._action_handler_feedback_cbgroup = ReentrantCallbackGroup()
         self._publisher_cbgroup = MutuallyExclusiveCallbackGroup()
 
         # Timers
@@ -227,7 +226,6 @@ class CoreDroneController(LifecycleNode):
                     self.get_logger().info(f"Starting handler: {name}")
                     if not handler.start(
                         callback_group=self._action_handler_cbgroup,
-                        feedback_callback_group=self._action_handler_feedback_cbgroup,
                     ):  # Pass group here
                         self.get_logger().error(f"Failed to start handler: {name}")
                         return (

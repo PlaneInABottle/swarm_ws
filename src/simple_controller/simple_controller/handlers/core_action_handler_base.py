@@ -18,6 +18,8 @@ from rclpy.callback_groups import (
     ReentrantCallbackGroup,
 )
 from rclpy.lifecycle import LifecycleNode
+from rclpy.task import Future
+from rclpy.timer import Timer
 
 
 class ActionHandlerBase(abc.ABC):
@@ -53,6 +55,9 @@ class ActionHandlerBase(abc.ABC):
         self._action_server: Optional[ActionServer] = None
         self._callback_group = None
         self._is_started = False
+        self.execute_future = None
+        self.execute_feedback_timer: Optional[Timer] = None
+        self.execute_timer_period = 0.2
 
     @property
     def logger(self) -> Any:  # Changed return type hint to Any
@@ -71,7 +76,6 @@ class ActionHandlerBase(abc.ABC):
 
     def start(
         self,
-        feedback_callback_group: Optional[CallbackGroup] = None,
         callback_group: Optional[CallbackGroup] = None,
     ) -> bool:
         """
@@ -94,7 +98,6 @@ class ActionHandlerBase(abc.ABC):
         try:
             # Change default callback groups
             self._callback_group = callback_group
-
             self._action_server = ActionServer(
                 node=self.parent_node,
                 action_type=self._action_type,
@@ -112,6 +115,7 @@ class ActionHandlerBase(abc.ABC):
             self._is_started = True
             return True
         except Exception as e:
+            # Hnadle the other variables
             self.logger.error(
                 f"[{self.__class__.__name__}] Failed to start Action Server '{self._action_name}': {e}"
             )
@@ -207,4 +211,8 @@ class ActionHandlerBase(abc.ABC):
         Returns:
             An instance of the action's Result message (e.g., Takeoff.Result()).
         """
+        pass
+
+    @abc.abstractmethod
+    async def execute_feedback_callback(self, feedback, goal_handle):
         pass
