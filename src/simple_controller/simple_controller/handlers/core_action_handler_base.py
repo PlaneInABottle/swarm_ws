@@ -6,9 +6,19 @@ import traceback
 from typing import Type, Any, Optional
 
 # Import specific rclpy types for hints
-from rclpy.action.server import ActionServer, GoalResponse, CancelResponse, ServerGoalHandle
-from rclpy.callback_groups import CallbackGroup, MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.action.server import (
+    ActionServer,
+    GoalResponse,
+    CancelResponse,
+    ServerGoalHandle,
+)
+from rclpy.callback_groups import (
+    CallbackGroup,
+    MutuallyExclusiveCallbackGroup,
+    ReentrantCallbackGroup,
+)
 from rclpy.lifecycle import LifecycleNode
+
 
 class ActionHandlerBase(abc.ABC):
     """
@@ -19,7 +29,13 @@ class ActionHandlerBase(abc.ABC):
     """
 
     # Use 'Any' for the logger type hint as direct import failed
-    def __init__(self, parent_node: LifecycleNode, logger: Any, action_name: str, action_type: Type):
+    def __init__(
+        self,
+        parent_node: LifecycleNode,
+        logger: Any,
+        action_name: str,
+        action_type: Type,
+    ):
         """
         Initializes the base action handler.
 
@@ -31,17 +47,15 @@ class ActionHandlerBase(abc.ABC):
             action_type: The type of the action definition (e.g., Takeoff, Land from interfaces).
         """
         self._parent_node = parent_node
-        self._logger = logger # Store the passed logger instance
+        self._logger = logger  # Store the passed logger instance
         self._action_name = action_name
         self._action_type = action_type
         self._action_server: Optional[ActionServer] = None
-        # Use a reentrant callback group to allow multiple goals potentially
-        # or other callbacks within the node to run concurrently with the action execution.
-        self._callback_group: CallbackGroup = ReentrantCallbackGroup()
+        self._callback_group = None
         self._is_started = False
 
     @property
-    def logger(self) -> Any: # Changed return type hint to Any
+    def logger(self) -> Any:  # Changed return type hint to Any
         """Provides read-only access to the logger instance."""
         return self._logger
 
@@ -55,7 +69,11 @@ class ActionHandlerBase(abc.ABC):
         """Returns True if the action server has been successfully started."""
         return self._is_started
 
-    def start(self,callback_group: Optional[CallbackGroup] = None) -> bool:
+    def start(
+        self,
+        feedback_callback_group: Optional[CallbackGroup] = None,
+        callback_group: Optional[CallbackGroup] = None,
+    ) -> bool:
         """
         Creates and initializes the ROS 2 Action Server for this handler.
         Should only be called once, typically during the parent node's configuration phase.
@@ -65,26 +83,38 @@ class ActionHandlerBase(abc.ABC):
         """
         if self._action_server is not None:
             # Use the stored logger instance
-            self.logger.warn(f"[{self.__class__.__name__}] Action server '{self._action_name}' already started.")
-            return True # Already started, consider it success
+            self.logger.warn(
+                f"[{self.__class__.__name__}] Action server '{self._action_name}' already started."
+            )
+            return True  # Already started, consider it success
 
-        self.logger.info(f"[{self.__class__.__name__}] Starting Action Server '{self._action_name}'...")
+        self.logger.info(
+            f"[{self.__class__.__name__}] Starting Action Server '{self._action_name}'..."
+        )
         try:
+            # Change default callback groups
+            self._callback_group = callback_group
+
             self._action_server = ActionServer(
                 node=self.parent_node,
                 action_type=self._action_type,
                 action_name=self._action_name,
-                execute_callback=self.execute_callback, 
-                goal_callback=self.goal_callback,       
-                handle_accepted_callback=self.handle_accepted_callback, 
-                cancel_callback=self.cancel_callback,     
-                callback_group=callback_group
+                execute_callback=self.execute_callback,
+                goal_callback=self.goal_callback,
+                handle_accepted_callback=self.handle_accepted_callback,
+                cancel_callback=self.cancel_callback,
+                callback_group=callback_group,
             )
-            self.logger.info(f"[{self.__class__.__name__}] Action Server '{self._action_name}' started successfully.")
+            self.logger.info(
+                f"[{self.__class__.__name__}] Action Server '{self._action_name}' started successfully."
+            )
+
             self._is_started = True
             return True
         except Exception as e:
-            self.logger.error(f"[{self.__class__.__name__}] Failed to start Action Server '{self._action_name}': {e}")
+            self.logger.error(
+                f"[{self.__class__.__name__}] Failed to start Action Server '{self._action_name}': {e}"
+            )
             self.logger.error(traceback.format_exc())
             self._action_server = None
             self._is_started = False
@@ -98,15 +128,20 @@ class ActionHandlerBase(abc.ABC):
         relying on garbage collection when references are removed. Setting to None helps.
         """
         if self._action_server is not None:
-            self.logger.info(f"[{self.__class__.__name__}] Stopping Action Server '{self._action_name}'...")
+            self.logger.info(
+                f"[{self.__class__.__name__}] Stopping Action Server '{self._action_name}'..."
+            )
             # TODO: Check if active goals need explicit cancellation here during stop.
             # This might depend on the desired shutdown behavior.
-            self._action_server = None # Remove reference to allow garbage collection
+            self._action_server = None  # Remove reference to allow garbage collection
             self._is_started = False
-            self.logger.info(f"[{self.__class__.__name__}] Action Server '{self._action_name}' stopped.")
+            self.logger.info(
+                f"[{self.__class__.__name__}] Action Server '{self._action_name}' stopped."
+            )
         else:
-             self.logger.debug(f"[{self.__class__.__name__}] Action server '{self._action_name}' was not running or already stopped.")
-
+            self.logger.debug(
+                f"[{self.__class__.__name__}] Action server '{self._action_name}' was not running or already stopped."
+            )
 
     # --- Abstract Methods to be Implemented by Concrete Handlers ---
 
@@ -134,12 +169,14 @@ class ActionHandlerBase(abc.ABC):
         Args:
             goal_handle: The handle for the accepted goal.
         """
-        self.logger.info(f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id.uuid.hex}. Starting execution...")
+        self.logger.info(
+            f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id.uuid.hex}. Starting execution..."
+        )
         # NOTE: Concrete handlers MUST call parent_node.set_internal_state here
         # before calling goal_handle.execute() if using the state machine pattern.
         # Example (should be in concrete handler override or called from it):
         # self.parent_node.set_internal_state(InternalState.EXECUTING_ACTION, goal_handle)
-        goal_handle.execute() # Start the execute_callback
+        goal_handle.execute()  # Start the execute_callback
 
     @abc.abstractmethod
     def cancel_callback(self, goal_handle: ServerGoalHandle) -> CancelResponse:
