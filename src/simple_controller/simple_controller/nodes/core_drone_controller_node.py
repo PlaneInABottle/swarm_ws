@@ -161,6 +161,7 @@ class CoreDroneController(LifecycleNode):
         """Configures resources: parameters, pubs/subs, handlers, timers."""
         self.get_logger().info("Configuring Core Drone Controller...")
         try:
+            super().on_configure(state)
             self._target_system_id = int(self.get_parameter("target_system_id").value)
             self._px4_ns_prefix = str(self.get_parameter("px4_ns_prefix").value)
             self._heartbeat_period = float(
@@ -250,6 +251,7 @@ class CoreDroneController(LifecycleNode):
 
     def on_activate(self, state: LifecycleState) -> TransitionCallbackReturn:
         try:
+            super().on_activate(state)
             self._is_active = True
             if None in [self._offboard_heartbeat_timer]:
                 self.get_logger().error(
