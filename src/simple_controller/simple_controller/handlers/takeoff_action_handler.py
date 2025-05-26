@@ -175,7 +175,7 @@ class TakeoffActionHandler(ActionHandlerBase):
             self.logger.info("Publishing Feedback")
             goal_handle.publish_feedback(feedback)
             if (
-                feedback.height_remaining >= 200
+                feedback.height_remaining >= 100
                 and self.execute_future is not None
                 and self.execute_feedback_timer is not None
             ):
