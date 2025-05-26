@@ -68,8 +68,8 @@ except ImportError as e:
 
 
 # --- Constants ---
-DEFAULT_HEARTBEAT_PERIOD = 0.01  # seconds (10 Hz) for OffboardControlMode
-SETPOINT_PUBLISH_PERIOD = 0.01  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
+DEFAULT_HEARTBEAT_PERIOD = 0.02  # seconds (10 Hz) for OffboardControlMode
+SETPOINT_PUBLISH_PERIOD = 0.02  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
 CONNECTION_TIMEOUT_SEC = 5.0  # Timeout for waiting for PX4 connection (status)
 AVOIDANCE_UPDATE_PERIOD = 0.1
 
