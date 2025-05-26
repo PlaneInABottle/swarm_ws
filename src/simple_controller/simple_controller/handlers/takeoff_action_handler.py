@@ -120,6 +120,11 @@ class TakeoffActionHandler(ActionHandlerBase):
         feedback = Takeoff.Feedback()
         self.execute_future = Future()
 
+        self.logger.info(f"Engaging Offboard Mode")
+        await self.parent_node.engage_offboard_mode()
+        self.logger.info(f"Engaging Arm Mode")
+        await self.parent_node.engage_arm_mode()
+
         partial_callback = functools.partial(
             self.execute_feedback_callback, feedback, goal_handle
         )
@@ -140,12 +145,6 @@ class TakeoffActionHandler(ActionHandlerBase):
             return result
 
         self.execute_future = None
-
-        # Make Drone Offboard
-        self.logger.info(f"Engaging Offboard Mode")
-        await self.parent_node.engage_offboard_mode()
-        self.logger.info(f"Engaging Arm Mode")
-        await self.parent_node.engage_arm_mode()
         # self.feedback_timer.reset()
 
         self.logger.info(f"Goal handler Request: {goal_handle.request}")
@@ -168,12 +167,15 @@ class TakeoffActionHandler(ActionHandlerBase):
 
     async def execute_feedback_callback(self, feedback, goal_handle):
         if self.is_started:
-            feedback.current_height += 1.0
+            current_position = self.parent_node.get_current_local_position()
+            self.parent_node.set_target_velocity_ned(0.0, 0.0, -1.0, 0.0)
+
+            feedback.current_height = current_position.z
             feedback.height_remaining += 2.0
             self.logger.info("Publishing Feedback")
             goal_handle.publish_feedback(feedback)
             if (
-                feedback.current_height >= 10
+                feedback.height_remaining >= 200
                 and self.execute_future is not None
                 and self.execute_feedback_timer is not None
             ):

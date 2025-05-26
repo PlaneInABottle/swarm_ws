@@ -2,6 +2,7 @@ import rclpy
 import traceback
 import time
 import math
+import numpy as np
 from enum import Enum, auto
 from threading import Lock
 from typing import Dict, Optional, Type, Any, cast  # Added cast for type checking
@@ -41,8 +42,8 @@ from px4_msgs.msg import (
 from swarm_interfaces.action import Takeoff
 
 from simple_controller.utils.types import InternalState
+from ..utils.avoidance import calculate_simple_avoidance_velocity
 
-# Import Handlers (assuming they are in ../handlers relative to this file)
 # Use try-except for imports if handlers are optional or might not exist initially
 try:
     from ..handlers.core_action_handler_base import ActionHandlerBase
@@ -67,9 +68,10 @@ except ImportError as e:
 
 
 # --- Constants ---
-DEFAULT_HEARTBEAT_PERIOD = 1  # seconds (10 Hz) for OffboardControlMode
-SETPOINT_PUBLISH_PERIOD = 0.05  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
+DEFAULT_HEARTBEAT_PERIOD = 0.01  # seconds (10 Hz) for OffboardControlMode
+SETPOINT_PUBLISH_PERIOD = 0.01  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
 CONNECTION_TIMEOUT_SEC = 5.0  # Timeout for waiting for PX4 connection (status)
+AVOIDANCE_UPDATE_PERIOD = 0.1
 
 
 class CoreDroneController(LifecycleNode):
@@ -87,8 +89,14 @@ class CoreDroneController(LifecycleNode):
 
         # --- Parameters (Declare defaults, get in on_configure) ---
         self.declare_parameter("target_system_id", 2)
-        self.declare_parameter("px4_ns_prefix", "px4_1")  # Example, should match drone
+        self.declare_parameter("px4_ns_prefix", "px4_1")
         self.declare_parameter("offboard_heartbeat_period", DEFAULT_HEARTBEAT_PERIOD)
+        self.declare_parameter("setpoint_publish_period", SETPOINT_PUBLISH_PERIOD)
+
+        self.declare_parameter("repulsive_gain", 0.8)
+        self.declare_parameter("obstacle_influence_radius", 5.0)
+        self.declare_parameter("max_speed", 2.0)
+        self.declare_parameter("avoidance_update_period", AVOIDANCE_UPDATE_PERIOD)
 
         # --- Lifecycle State ---
         self._is_active: bool = False
@@ -98,38 +106,58 @@ class CoreDroneController(LifecycleNode):
         self._px4_ns_prefix: str = "px4_1"
         self._heartbeat_period: float = DEFAULT_HEARTBEAT_PERIOD
 
+        self._desired_velocity_ned: list[float] = [0.0, 0.0, 0.0]  # vx, vy, vz
+        self._desired_yaw_rate: float = 0.0  # rad/s
+        self._current_local_position: Optional[VehicleLocalPosition] = None
+
+        # TODO - populate this list
+        self._other_drones_local_ned_list: list[np.ndarray] = []
+
+        self._avoidance_repulsion_strength: float = 0.8
+        self._avoidance_safety_radius: float = 5.0
+        self._avoidance_max_overall_speed: float = 2.0
+
+        # --- Locks ---
+
+        self._setpoint_lock = Lock()  # For thread-safe access to desired setpoints
+        self._local_position_lock = Lock()
+        self._other_drones_lock = Lock()
+
         # Internal State Machine
         self._internal_state: InternalState = InternalState.INIT
-        self._active_goal_handle: Optional[ServerGoalHandle] = (
-            None  # Store the currently active goal
-        )
+        self._active_goal_handle: Optional[ServerGoalHandle] = None
 
         # --- Service Clients ---
-        # Change type later
         self._vehicle_command_client: Optional[Client] = None
 
         # --- Action Handlers ---
         self._handlers: dict[str, ActionHandlerBase] = {}
 
         # --- Callback Groups ---
-        self._cbgroup = MutuallyExclusiveCallbackGroup()
         self._action_handler_cbgroup = MutuallyExclusiveCallbackGroup()
-        self._publisher_cbgroup = MutuallyExclusiveCallbackGroup()
+        self._publisher_cbgroup = ReentrantCallbackGroup()
+        self._subscriber_cbgroup = MutuallyExclusiveCallbackGroup()
 
-        # Timers
-        # If left in the default callback_group it blocks the call to this node
         # --- Publishers, Subscribers, Timers (Initialized to None) ---
-        self._offboard_control_mode_pub: Optional[Publisher] = None
+
+        # If timers left in the default callback_group it blocks the call to this node
         self._offboard_heartbeat_timer: Optional[Timer] = None
+        self._setpoint_publishing_timer: Optional[Timer] = None
+        self._avoidance_update_timer: Optional[Timer] = None
+
+        self._offboard_control_mode_publisher: Optional[Publisher] = None
+        self._trajectory_setpoint_publisher: Optional[Publisher] = None
+
+        self._vehicle_local_position_subscriber: Optional[Subscription] = None
         # self._offboard_heartbeat_timer2 = self.create_timer(
         #   self._heartbeat_period, self._test_callbackv2, callback_group=self._cbgroup
         # )
 
         # Use try-except during instantiation if a handler class might be missing
         try:
-            self.get_logger().debug("Attempting to instantiate TakeoffActionHandler...")
+            self.get_logger().info("Attempting to instantiate TakeoffActionHandler...")
             self._handlers["takeoff"] = TakeoffActionHandler(self, self.get_logger())
-            self.get_logger().debug("TakeoffActionHandler instantiated.")
+            self.get_logger().info("TakeoffActionHandler instantiated.")
         except NameError as e:
             self.get_logger().error(
                 f"Failed to instantiate handlers, class likely missing: {e}"
@@ -167,6 +195,20 @@ class CoreDroneController(LifecycleNode):
             self._heartbeat_period = float(
                 self.get_parameter("offboard_heartbeat_period").value
             )
+            self._setpoint_period = float(
+                self.get_parameter("setpoint_publish_period").value
+            )
+            self._avoidance_repulsion_strength = self.get_parameter(
+                "repulsive_gain"
+            ).value
+            self._avoidance_safety_radius = self.get_parameter(
+                "obstacle_influence_radius"
+            ).value
+            self._avoidance_max_overall_speed = self.get_parameter("max_speed").value
+
+            self._avoidance_update_period = float(
+                self.get_parameter("avoidance_update_period").value
+            )
 
             # Configure Command Service
             self._vehicle_command_client = self.create_client(
@@ -194,21 +236,41 @@ class CoreDroneController(LifecycleNode):
                 history=HistoryPolicy.KEEP_LAST,
                 depth=1,
             )
-            qos_sub_pose = QoSProfile(
+            qos_subscriber_volatile = QoSProfile(
                 reliability=ReliabilityPolicy.BEST_EFFORT,
                 durability=DurabilityPolicy.VOLATILE,
                 history=HistoryPolicy.KEEP_LAST,
-                depth=5,
+                depth=1,
             )
             # Configure publishers
             fmu_in_base = f"/{self._px4_ns_prefix}/fmu/in"
-            self._offboard_control_mode_pub = self.create_lifecycle_publisher(
+            fmu_out_base = f"/{self._px4_ns_prefix}/fmu/out"
+
+            self._offboard_control_mode_publisher = self.create_lifecycle_publisher(
                 OffboardControlMode,
                 f"{fmu_in_base}/offboard_control_mode",
                 qos_pub_reliable,
+                callback_group=self._publisher_cbgroup,
             )
 
-            # Configure Heartbeat - Offboard Timer (paused)
+            self._trajectory_setpoint_publisher = self.create_lifecycle_publisher(
+                TrajectorySetpoint,
+                f"{fmu_in_base}/trajectory_setpoint",
+                qos_pub_reliable,
+                callback_group=self._publisher_cbgroup,
+            )
+
+            # Configure subscribers
+            self._vehicle_local_position_subscriber = self.create_subscription(
+                VehicleLocalPosition,
+                f"{fmu_out_base}/vehicle_local_position",
+                self._vehicle_local_position_callback,
+                qos_subscriber_volatile,
+                callback_group=self._subscriber_cbgroup,  # Or another suitable callback group
+            )
+
+            # Configure Timers
+            # Offboard Timer
             self._offboard_heartbeat_timer = self.create_timer(
                 self._heartbeat_period,
                 self._publish_offboard_control_mode_heartbeat,
@@ -216,6 +278,20 @@ class CoreDroneController(LifecycleNode):
             )
             self._offboard_heartbeat_timer.cancel()
             #
+            self._setpoint_publishing_timer = self.create_timer(
+                self._setpoint_period,
+                self._publish_trajectory_setpoint,
+                self._publisher_cbgroup,
+            )
+            self._setpoint_publishing_timer.cancel()
+
+            self._avoidance_update_timer = self.create_timer(
+                self._avoidance_update_period,
+                self._update_avoidance_logic_callback,
+                self._publisher_cbgroup,
+            )
+            self._avoidance_update_timer.cancel()  # Start it in on_activate as you do
+
             # Start Action Handlers
             if not self._handlers:
                 self.get_logger().warn("No action handlers were instantiated.")
@@ -230,11 +306,9 @@ class CoreDroneController(LifecycleNode):
                         callback_group=self._action_handler_cbgroup,
                     ):  # Pass group here
                         self.get_logger().error(f"Failed to start handler: {name}")
-                        return (
-                            TransitionCallbackReturn.FAILURE
-                        )  # Indicate configuration failed
+                        return TransitionCallbackReturn.FAILURE
                     else:
-                        self.get_logger().debug(
+                        self.get_logger().info(
                             f"on_configure: Handler '{name}' started successfully."
                         )
                 else:
@@ -253,7 +327,10 @@ class CoreDroneController(LifecycleNode):
         try:
             super().on_activate(state)
             self._is_active = True
-            if None in [self._offboard_heartbeat_timer]:
+            if None in [
+                self._offboard_heartbeat_timer,
+                self._setpoint_publishing_timer,
+            ]:
                 self.get_logger().error(
                     "Cannot activate: Not all components were created during configure."
                 )
@@ -261,6 +338,8 @@ class CoreDroneController(LifecycleNode):
 
             # Use cast to satisfy type checker, we checked for None above
             cast(Timer, self._offboard_heartbeat_timer).reset()
+            cast(Timer, self._setpoint_publishing_timer).reset()
+            cast(Timer, self._avoidance_update_timer).reset()
 
             self.get_logger().info("Simple Controller Activated Successfully")
 
@@ -378,7 +457,6 @@ class CoreDroneController(LifecycleNode):
             )
 
             self.get_logger().info(f"Sent command result: {result.reply}")
-            # Asynchronously call the service
 
             return True
         except Exception as e:
@@ -387,7 +465,7 @@ class CoreDroneController(LifecycleNode):
 
     def _publish_offboard_control_mode_heartbeat(self):
         """Publishes the OffboardControlMode message periodically."""
-        if self._offboard_control_mode_pub is None:
+        if self._offboard_control_mode_publisher is None:
             self.get_logger().info(
                 "Heartbeat - Offboard Timer: Publisher not available, skipping.",
                 throttle_duration_sec=5.0,
@@ -395,22 +473,182 @@ class CoreDroneController(LifecycleNode):
             return
 
         msg = OffboardControlMode()
-        msg.position = True
-        msg.velocity = False  # Set true if handlers use velocity control
+        msg.position = False
+        msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         try:
-            self.get_logger().debug(
+            self.get_logger().info(
                 f"Heartbeat-Offboard Pub: Pos={msg.position}, Vel={msg.velocity}, Acc={msg.acceleration}, Att={msg.attitude}, Rate={msg.body_rate}",
                 throttle_duration_sec=1.0,
             )
-            self._offboard_control_mode_pub.publish(msg)
+            self._offboard_control_mode_publisher.publish(msg)
         except Exception as e:
             self.get_logger().error(
                 f"Failed to publish offboard control mode: {e}", throttle_duration_sec=5
             )
+
+    def _publish_trajectory_setpoint(self):
+        """
+        Publishes the current TrajectorySetpoint.
+        This method is called by a timer and uses the desired setpoints
+        (e.g., _desired_velocity_ned, _desired_yaw_rate) that are
+        updated by action handlers or other control logic.
+        """
+        if self._trajectory_setpoint_publisher is None or not self._is_active:
+            # self.get_logger().debug( # Optional: for verbose debugging
+            #     "Setpoint Timer: Trajectory publisher not available or node inactive, skipping.",
+            #     throttle_duration_sec=5.0
+            # )
+            return
+
+        msg = TrajectorySetpoint()
+
+        # Lock to ensure thread-safe access to the desired setpoint variables
+        with self._setpoint_lock:
+            # Populate based on the control mode you intend to use primarily.
+            # For velocity control (as set in _publish_offboard_control_mode_heartbeat):
+            msg.velocity = [
+                float(self._desired_velocity_ned[0]),
+                float(self._desired_velocity_ned[1]),
+                float(self._desired_velocity_ned[2]),
+            ]  #
+            msg.yawspeed = float(self._desired_yaw_rate)  #
+
+            # When controlling velocity, position setpoints should typically be NaN.
+            msg.position = [float("nan"), float("nan"), float("nan")]
+            msg.yaw = float("nan")
+
+            # Acceleration and jerk are also often set to NaN unless explicitly controlled.
+            msg.acceleration = [float("nan"), float("nan"), float("nan")]
+            msg.jerk = [float("nan"), float("nan"), float("nan")]
+
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+        try:
+            self.get_logger().info(
+                f"Publishing TrajectorySetpoint: Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], YawRate={msg.yawspeed:.2f}",
+                throttle_duration_sec=1.0,
+            )
+            self._trajectory_setpoint_publisher.publish(msg)
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+            )
+
+    def set_target_velocity_ned(
+        self, vx: float, vy: float, vz: float, yaw_rate: float = 0.0
+    ):
+        """
+        Sets the desired velocity in NED frame (m/s) and yaw rate (rad/s).
+        This method is called by action handlers or other control logic.
+        """
+        try:
+            with self._setpoint_lock:  #
+                self._desired_velocity_ned = [vx, vy, vz]  #
+                self._desired_yaw_rate = yaw_rate  #
+            self.get_logger().info(
+                f"Target velocity NED set to: [{vx:.2f}, {vy:.2f}, {vz:.2f}], YawRate: {yaw_rate:.2f}",
+                throttle_duration_sec=1.0,
+            )
+            return True
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+            )
+            return False
+
+    def _vehicle_local_position_callback(self, msg: VehicleLocalPosition):
+        with self._local_position_lock:
+            self._current_local_position = msg
+
+        self.get_logger().info(
+            f"Local POSITION: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}",
+            throttle_duration_sec=1.0,
+        )
+
+    def get_current_local_position(self):
+        with self._local_position_lock:
+            return self._current_local_position
+
+    def _update_avoidance_logic_callback(
+        self,
+    ):
+        if not self._is_active:
+            return
+
+        with self._local_position_lock:
+            my_current_local_position_msg = self._current_local_position
+
+        if my_current_local_position_msg is None or not (
+            my_current_local_position_msg.xy_valid
+            and my_current_local_position_msg.z_valid
+        ):
+            self.get_logger().warn(
+                "Avoidance: Own local position not available or not valid.",
+                throttle_duration_sec=5.0,
+            )
+            # Default to hover if own position is unknown to prevent flyaways
+            self.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
+            return
+
+        my_current_pos_ned = np.array(
+            [
+                my_current_local_position_msg.x,
+                my_current_local_position_msg.y,
+                my_current_local_position_msg.z,
+            ]
+        )
+
+        # This list needs to be populated by your GPS processing and transformation logic
+        with self._other_drones_lock:
+            current_other_drones_positions_ned = list(self._other_drones_local_ned_list)
+
+        # --- Determine Base Desired Velocity ---
+        # This is what your drone WANTS to do (e.g., formation, waypoint following, hover)
+        # For now, let's assume a default hover or a commanded velocity if an action is active.
+        # If an action handler (like a formation controller) is active, it should be setting
+        # self._desired_velocity_ned and self._desired_yaw_rate.
+        # The avoidance will then adjust this.
+
+        current_base_desired_velocity_ned = np.array(
+            [0.0, 0.0, 0.0]
+        )  # Default to hover
+        current_base_yaw_rate = 0.0
+
+        # If action handlers directly update _desired_velocity_ned, we can use that as input
+        with self._setpoint_lock:  # Access the values set by handlers/other logic
+            current_base_desired_velocity_ned = np.array(self._desired_velocity_ned)
+            current_base_yaw_rate = self._desired_yaw_rate
+
+        # Call the actual avoidance function from avoidance.py
+        final_velocity_ned = calculate_simple_avoidance_velocity(
+            current_position_ned=my_current_pos_ned,
+            other_drones_ned_positions=current_other_drones_positions_ned,
+            base_desired_velocity_ned=current_base_desired_velocity_ned,
+            safety_radius=self._avoidance_safety_radius,  # Using loaded parameter
+            repulsion_strength=self._avoidance_repulsion_strength,  # Using loaded parameter
+            max_overall_speed=self._avoidance_max_overall_speed,  # Using loaded parameter
+        )
+
+        # The avoidance algorithm might change the direction, so re-evaluate yaw if needed,
+        # or keep the base_yaw_rate if that's preferred for the maneuver.
+        # For simplicity, we'll use the current_base_yaw_rate unless you have specific logic.
+
+        # Update the controller's target velocity with the avoidance-adjusted velocity
+        self.set_target_velocity_ned(
+            final_velocity_ned[0],
+            final_velocity_ned[1],
+            final_velocity_ned[2],
+            current_base_yaw_rate,  # Or a yaw rate calculated based on final_vel_ned
+        )
+
+        self.get_logger().info(
+            f"Avoidance Adjusted Vel NED: [{final_velocity_ned[0]:.2f}, {final_velocity_ned[1]:.2f}, {final_velocity_ned[2]:.2f}]",
+            throttle_duration_sec=1.0,
+        )
 
     async def engage_arm_mode(self):
         """Sends the ARM command."""
@@ -422,7 +660,6 @@ class CoreDroneController(LifecycleNode):
 
     async def engage_offboard_mode(self):
         """Sends command to switch to Offboard flight mode."""
-        # PX4 requires continuous setpoints BEFORE this command is accepted.
         self.get_logger().info("Sending SET_MODE=OFFBOARD command...")
 
         # VEHICLE_CMD_DO_SET_MODE: param1 = base_mode (1 for custom mode), param2 = custom_mode (6 for Offboard)
@@ -441,7 +678,7 @@ def main(args: Optional[list[str]] = None):
     try:
         rclpy.init(args=args)
         node = CoreDroneController()
-        node.get_logger().debug("[Main] Node instance created.")
+        node.get_logger().info("[Main] Node instance created.")
 
         executor = MultiThreadedExecutor(num_threads=1)
         executor.add_node(node)
@@ -453,7 +690,7 @@ def main(args: Optional[list[str]] = None):
         else:
             print("Keyboard interrupt, shutting down...")
         if node:
-            node.get_logger().debug("[Main] KeyboardInterrupt caught.")
+            node.get_logger().info("[Main] KeyboardInterrupt caught.")
     except Exception as e:
         if node:
             node.get_logger().error(f"Exception in main spin: {e}")
@@ -461,7 +698,7 @@ def main(args: Optional[list[str]] = None):
             print(f"Exception before node init: {e}")
         traceback.print_exc()
         if node:
-            node.get_logger().debug(f"[Main] Exception caught: {e}")
+            node.get_logger().info(f"[Main] Exception caught: {e}")
 
 
 if __name__ == "__main__":

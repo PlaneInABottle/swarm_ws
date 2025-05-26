@@ -57,7 +57,7 @@ class ActionHandlerBase(abc.ABC):
         self._is_started = False
         self.execute_future = None
         self.execute_feedback_timer: Optional[Timer] = None
-        self.execute_timer_period = 0.2
+        self.execute_timer_period = 1
 
     @property
     def logger(self) -> Any:  # Changed return type hint to Any
