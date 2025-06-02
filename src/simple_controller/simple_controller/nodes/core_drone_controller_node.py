@@ -673,16 +673,9 @@ class CoreDroneController(LifecycleNode):
         with self._local_position_lock:
             my_current_local_position_msg = self._current_local_position
 
-        if my_current_local_position_msg is None or not (
-            my_current_local_position_msg.xy_valid
-            and my_current_local_position_msg.z_valid
-        ):
-            self.get_logger().warn(
-                "Avoidance: Own local position not available or not valid.",
-                throttle_duration_sec=5.0,
-            )
-            # Default to hover if own position is unknown to prevent flyaways
-            self.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
+        is_position_hold_intent = self._desired_velocity_ned == [0.0, 0.0, 0.0]
+
+        if is_position_hold_intent:
             return
 
         my_current_pos_ned = np.array(
