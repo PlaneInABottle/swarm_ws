@@ -106,6 +106,9 @@ class CoreDroneController(LifecycleNode):
         self._px4_ns_prefix: str = "px4_1"
         self._heartbeat_period: float = DEFAULT_HEARTBEAT_PERIOD
 
+        self._is_armed: bool = False
+        self._is_offboard: bool = False
+
         self._desired_velocity_ned: list[float] = [0.0, 0.0, 0.0]  # vx, vy, vz
         self._desired_yaw_rate: float = 0.0  # rad/s
         self._current_local_position: Optional[VehicleLocalPosition] = None
@@ -121,6 +124,7 @@ class CoreDroneController(LifecycleNode):
 
         self._setpoint_lock = Lock()  # For thread-safe access to desired setpoints
         self._local_position_lock = Lock()
+        self._vehicle_status_lock = Lock()
         self._other_drones_lock = Lock()
 
         # Internal State Machine
@@ -148,6 +152,7 @@ class CoreDroneController(LifecycleNode):
         self._offboard_control_mode_publisher: Optional[Publisher] = None
         self._trajectory_setpoint_publisher: Optional[Publisher] = None
 
+        self._vehicle_status_subscriber: Optional[Subscription] = None
         self._vehicle_local_position_subscriber: Optional[Subscription] = None
         # self._offboard_heartbeat_timer2 = self.create_timer(
         #   self._heartbeat_period, self._test_callbackv2, callback_group=self._cbgroup
@@ -266,11 +271,18 @@ class CoreDroneController(LifecycleNode):
                 f"{fmu_out_base}/vehicle_local_position",
                 self._vehicle_local_position_callback,
                 qos_subscriber_volatile,
-                callback_group=self._subscriber_cbgroup,  # Or another suitable callback group
+                callback_group=self._subscriber_cbgroup,
+            )
+
+            self._vehicle_status_subscriber = self.create_subscription(
+                VehicleStatus,
+                f"{fmu_out_base}/vehicle_status_v1",
+                self._vehicle_status_callback,
+                qos_subscriber_volatile,
+                callback_group=self._subscriber_cbgroup,
             )
 
             # Configure Timers
-            # Offboard Timer
             self._offboard_heartbeat_timer = self.create_timer(
                 self._heartbeat_period,
                 self._publish_offboard_control_mode_heartbeat,
@@ -568,6 +580,27 @@ class CoreDroneController(LifecycleNode):
             f"Local POSITION: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}",
             throttle_duration_sec=1.0,
         )
+
+    def _vehicle_status_callback(self, msg: VehicleStatus):
+        with self._vehicle_status_lock:
+            self._vehicle_status = msg
+            self._is_armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
+            self._is_offboard = msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+
+        self.get_logger().info(
+            f"Is Armed: {self._is_armed}",
+            throttle_duration_sec=3.0,
+        )
+        self.get_logger().info(
+            f"Is Offboard: {self._is_offboard}",
+            throttle_duration_sec=3.0,
+        )
+
+    def is_armed(self):
+        return self._is_armed
+
+    def is_offboard(self):
+        return self._is_offboard
 
     def get_current_local_position(self):
         with self._local_position_lock:
