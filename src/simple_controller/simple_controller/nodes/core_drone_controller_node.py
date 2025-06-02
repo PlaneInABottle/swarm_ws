@@ -485,9 +485,16 @@ class CoreDroneController(LifecycleNode):
             )
             return
 
+        is_position_hold_intent = self._desired_velocity_ned == [0.0, 0.0, 0.0]
+
         msg = OffboardControlMode()
-        msg.position = True
+        msg.position = False
         msg.velocity = True
+
+        if is_position_hold_intent:
+            msg.position = True
+            msg.velocity = False
+
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -610,7 +617,7 @@ class CoreDroneController(LifecycleNode):
         try:
             with self._setpoint_lock:  #
                 self._desired_position_ned = [x, y, z]  #
-                self._desired_velocity_ned = [float("nan"), float("nan"), float("nan")]
+                self._desired_velocity_ned = [0.0, 0.0, 0.0]
             self.get_logger().info(
                 f"Target Position NED set to: [{x:.2f}, {y:.2f}, {z:.2f}]",
                 throttle_duration_sec=1.0,
