@@ -118,66 +118,185 @@ class TakeoffActionHandler(ActionHandlerBase):
         """
         result = Takeoff.Result()
         feedback = Takeoff.Feedback()
+        request: Takeoff.Goal = goal_handle.request
+
         self.execute_future = Future()
 
-        self.logger.info(f"Engaging Offboard Mode")
-        await self.parent_node.engage_offboard_mode()
-        self.logger.info(f"Engaging Arm Mode")
-        await self.parent_node.engage_arm_mode()
+        # --- 1. Preparation and Sanity Checks ---
+        current_pos = self.parent_node.get_current_local_position()
+        if current_pos is None:
+            result.success = False
+            result.message = "Failed to get current position at takeoff start."
+            self.logger.error(result.message)
+            goal_handle.abort()
+            # self.parent_node.set_internal_state(InternalState.IDLE_ON_GROUND) # Or appropriate error state
+            return result
+
+        self._takeoff_start_z = current_pos.z
+        self._target_height_relative = request.target_height
+        self._target_z_ned = self._takeoff_start_z - self._target_height_relative
+
+        # --- 2. Engage Offboard and Arm ---
+        try:
+            self.logger.info("Engaging Offboard Mode...")
+            if not await self.parent_node.engage_offboard_mode():
+                raise RuntimeError("Failed to engage Offboard mode.")
+            self.logger.info("Offboard mode engaged.")
+
+            self.logger.info("Arming drone...")
+            if not await self.parent_node.engage_arm_mode():
+                raise RuntimeError("Failed to arm drone.")
+            self.logger.info("Drone armed.")
+            # self.parent_node.set_internal_state(InternalState.ARMING) # Or similar
+        except RuntimeError as e:
+            result.success = False
+            result.message = str(e)
+            self.logger.error(f"Takeoff pre-flight check failed: {e}")
+            goal_handle.abort()
+            # self.parent_node.set_internal_state(InternalState.IDLE_ON_GROUND) # Or error state
+            return result
+
+        # --- 3. Start Feedback Timer and Await Completion ---
+        # Initialize feedback
+        feedback.current_height = -self._takeoff_start_z  # Positive height above start (approx, if start_z is near 0 relative to some origin)
+        feedback.height_remaining = self._target_height_relative
 
         partial_callback = functools.partial(
-            self.execute_feedback_callback, feedback, goal_handle
+            self.execute_feedback_callback, feedback, goal_handle, request
         )
         self.execute_feedback_timer = self.parent_node.create_timer(
             self.execute_timer_period,
             partial_callback,
             callback_group=self._callback_group,  # Can be same or different CB group
         )
-        if self.execute_future is not None:
-            await self.execute_future
+
+        action_outcome = await self.execute_future
+
+        # Clean up
+        if self.execute_feedback_timer:
+            self.execute_feedback_timer.cancel()
+        self.execute_feedback_timer = None
+        self.execute_future = None
+        self._takeoff_start_z = None
+        self._target_height_relative = None
+        self._target_z_ned = None
+        self._action_start_time = None
+
+        # --- 4. Process Result ---
+        if goal_handle.is_cancel_requested:
+            result.success = False
+            result.message = "Takeoff canceled by request."
+            goal_handle.canceled()
+            self.logger.info(result.message)
+            # self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Or as appropriate
+        elif action_outcome and action_outcome.get("success", False):
+            result.success = True
+            result.message = action_outcome.get("message", "Takeoff successful.")
+            result.final_height = action_outcome.get("final_height", 0.0)
+            goal_handle.succeed()
+            self.logger.info(result.message)
+            # self.parent_node.set_internal_state(InternalState.IDLE_HOVERING)
         else:
             result.success = False
-            result.message = f"Error during takeoff"
-            result.final_height = 1.0
-            # Be carefull about integer or float. 0.0 is float
-            goal_handle.canceled()
-            self.logger.info("Failed ")
-            return result
+            result.message = action_outcome.get("message", "Takeoff failed.")
+            goal_handle.abort()
+            self.logger.error(result.message)
+            # self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Or appropriate error state
 
-        self.execute_future = None
-        # self.feedback_timer.reset()
-
-        self.logger.info(f"Goal handler Request: {goal_handle.request}")
-        request: Takeoff.Goal = goal_handle.request
-
-        self.logger.info(f"Normal Requst  {request}")
-
-        self.logger.info("Setting Result")
-        result.success = True
-        result.message = f"Error during takeoff"
-        self.logger.info("Setting ResultV2")
-        result.final_height = 1.0
-
-        # ** Publish Feedback **
-        # Be carefull about integer or float. 0.0 is float
-        goal_handle.succeed()
-
-        self.logger.info("Returning result")
         return result
 
-    async def execute_feedback_callback(self, feedback, goal_handle):
-        if self.is_started:
-            current_position = self.parent_node.get_current_local_position()
-            self.parent_node.set_target_velocity_ned(0.0, 0.0, -1.0, 0.0)
+    async def execute_feedback_callback(self, feedback, goal_handle, request):
+        if (
+            not self.is_started
+            or self._takeoff_start_z is None
+            or self._target_height_relative is None
+            or self._target_z_ned is None
+        ):
+            self.logger.warn("Takeoff not properly initialized. Skipping feedback.")
+            return
 
-            feedback.current_height = current_position.z
-            feedback.height_remaining += 2.0
-            self.logger.info("Publishing Feedback")
-            goal_handle.publish_feedback(feedback)
-            if (
-                feedback.height_remaining >= 100
-                and self.execute_future is not None
-                and self.execute_feedback_timer is not None
-            ):
-                self.execute_future.set_result(None)
-                self.execute_feedback_timer.cancel()
+        # --- 1. Handle Cancellation ---
+        if goal_handle.is_cancel_requested:
+            if self.execute_future and not self.execute_future.done():
+                self.execute_future.set_result(
+                    {"success": False, "message": "Takeoff canceled during execution."}
+                )
+            # Command drone to hold current position before exiting
+            # self.parent_node.hold_current_position() # Implement this in parent
+            return
+
+        # --- 2. Get Current State ---
+        current_position = self.parent_node.get_current_local_position()
+        if current_position is None:
+            self.logger.warn("Cannot get current position in feedback loop.")
+            return
+
+        current_z_ned = current_position.z
+
+        # --- 3. Check Arm Status (important during ascent) ---
+        if not self.parent_node.is_armed():
+            self.logger.error("Drone became disarmed during takeoff!")
+            if self.execute_future and not self.execute_future.done():
+                self.execute_future.set_result(
+                    {"success": False, "message": "Drone disarmed during takeoff."}
+                )
+            return
+
+        # --- 4. Command Drone (Using Velocity or Position Control) ---
+        # Determine the desired vertical velocity.
+        # NED: positive velocity is downwards, negative velocity is upwards.
+        desired_vertical_velocity_ned = -DEFAULT_TAKEOFF_VELOCITY  # Default upwards
+        if request.takeoff_velocity > 0:  # User provided a positive "upwards" velocity
+            desired_vertical_velocity_ned = -abs(request.takeoff_velocity)
+            self.logger.debug(
+                f"Using requested takeoff_velocity: {-desired_vertical_velocity_ned:.2f} m/s upwards."
+            )
+        else:
+            self.logger.debug(
+                f"Using default takeoff_velocity: {-desired_vertical_velocity_ned:.2f} m/s upwards."
+            )
+
+        self.parent_node.set_target_velocity_ned(
+            0.0, 0.0, desired_vertical_velocity_ned, 0.0
+        )
+
+        # --- 5. Calculate Feedback (Consistent with Action Definition) ---
+
+        # `current_height`: current height relative to takeoff point (positive upwards)
+        # `self._takeoff_start_z` is NED (e.g., -0.1m)
+        # `current_z_ned` is NED (e.g., -2.1m if 2m above start)
+        # Height ascended = `self._takeoff_start_z` - `current_z_ned`
+        # e.g., -0.1 - (-2.1) = 2.0m
+        feedback.current_height = self._takeoff_start_z - current_z_ned
+
+        # `height_remaining`: Estimated height remaining to target (positive)
+        # `self._target_z_ned` is the absolute target Z in NED (e.g., _takeoff_start_z - target_height_relative)
+        # `height_remaining_ned_difference = current_z_ned - self._target_z_ned`
+        # e.g., current_z_ned = -2.1, target_z_ned = -5.1 (for a 5m takeoff from -0.1m)
+        # remaining = -2.1 - (-5.1) = 3.0m
+        height_remaining_ned_diff = current_z_ned - self._target_z_ned
+        feedback.height_remaining = max(0.0, height_remaining_ned_diff)
+
+        goal_handle.publish_feedback(feedback)
+
+        # --- 6. Check for Completion ---
+        # `height_remaining_ned_diff` is current_z - target_z.
+        # If at target, this is 0. If below target (still ascending), it's positive.
+        # If overshot (more negative Z than target), it's negative.
+        if abs(height_remaining_ned_diff) < ALTITUDE_TOLERANCE:
+            self.logger.info(
+                f"Target altitude reached (Height remaining diff: {height_remaining_ned_diff:.2f}m, Tolerance: {ALTITUDE_TOLERANCE}m)."
+            )
+            # ... (Stabilization logic, sonra ekleriz ) ...
+            self.parent_node.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
+
+            if self.execute_future and not self.execute_future.done():
+                # For the result, final_height is also relative to takeoff point
+                final_height_relative = self._takeoff_start_z - current_z_ned
+                self.execute_future.set_result(
+                    {
+                        "success": True,
+                        "message": "Takeoff successful, altitude reached.",
+                        "final_height": final_height_relative,
+                    }
+                )
