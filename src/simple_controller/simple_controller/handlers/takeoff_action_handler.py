@@ -288,7 +288,7 @@ class TakeoffActionHandler(ActionHandlerBase):
                 f"Target altitude reached (Height remaining diff: {height_remaining_ned_diff:.2f}m, Tolerance: {ALTITUDE_TOLERANCE}m)."
             )
             # ... (Stabilization logic, sonra ekleriz ) ...
-            self.parent_node.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
+            self.parent_node.set_target_position_ned(0.0, 0.0, self._target_z_ned)
 
             if self.execute_future and not self.execute_future.done():
                 # For the result, final_height is also relative to takeoff point

@@ -109,6 +109,7 @@ class CoreDroneController(LifecycleNode):
         self._is_armed: bool = False
         self._is_offboard: bool = False
 
+        self._desired_position_ned: list[float] = [0.0, 0.0, 0.0]  # x, y, z
         self._desired_velocity_ned: list[float] = [0.0, 0.0, 0.0]  # vx, vy, vz
         self._desired_yaw_rate: float = 0.0  # rad/s
         self._current_local_position: Optional[VehicleLocalPosition] = None
@@ -485,7 +486,7 @@ class CoreDroneController(LifecycleNode):
             return
 
         msg = OffboardControlMode()
-        msg.position = False
+        msg.position = True
         msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
@@ -520,24 +521,56 @@ class CoreDroneController(LifecycleNode):
 
         # Lock to ensure thread-safe access to the desired setpoint variables
         with self._setpoint_lock:
-            # Populate based on the control mode you intend to use primarily.
-            # For velocity control (as set in _publish_offboard_control_mode_heartbeat):
-            msg.velocity = [
-                float(self._desired_velocity_ned[0]),
-                float(self._desired_velocity_ned[1]),
-                float(self._desired_velocity_ned[2]),
-            ]  #
-            msg.yawspeed = float(self._desired_yaw_rate)  #
+            is_position_hold_intent = self._desired_velocity_ned == [0.0, 0.0, 0.0]
 
-            # When controlling velocity, position setpoints should typically be NaN.
-            msg.position = [float("nan"), float("nan"), float("nan")]
-            msg.yaw = float("nan")
+            if is_position_hold_intent:
+                # --- POSITION HOLD MODE ---
+                msg.position = [
+                    float(self._desired_position_ned[0]),
+                    float(self._desired_position_ned[1]),
+                    float(self._desired_position_ned[2]),
+                ]
 
-            # Acceleration and jerk are also often set to NaN unless explicitly controlled.
-            msg.acceleration = [float("nan"), float("nan"), float("nan")]
-            msg.jerk = [float("nan"), float("nan"), float("nan")]
+                # For position hold with velocity feedforward enabled in OffboardControlMode,
+                # send [0,0,0] velocity and 0 yawspeed.
+                msg.velocity = [0.0, 0.0, 0.0]
+                msg.yawspeed = 0.0
+                current_mode_log_str = "POSITION"
+                log_details = (
+                    f"Pos=[{msg.position[0]:.2f}, {msg.position[1]:.2f}, {msg.position[2]:.2f}], "
+                    f"Yaw={msg.yaw:.2f}, VelFF=[0,0,0]"
+                )
+            else:
+                # --- VELOCITY CONTROL MODE ---
+                msg.velocity = [
+                    float(self._desired_velocity_ned[0]),
+                    float(self._desired_velocity_ned[1]),
+                    float(self._desired_velocity_ned[2]),
+                ]
+                msg.yawspeed = float(self._desired_yaw_rate)
+                msg.position = [float("nan"), float("nan"), float("nan")]
+                current_mode_log_str = "VELOCITY"
+                log_details = (
+                    f"Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], "
+                    f"YawRate={msg.yawspeed:.2f}"
+                )
 
+        # Acceleration and jerk are usually NaN unless explicitly controlled
+        msg.yaw = float("nan")
+        msg.acceleration = [float("nan"), float("nan"), float("nan")]
+        msg.jerk = [float("nan"), float("nan"), float("nan")]
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+        try:
+            self.get_logger().info(
+                f"Publishing TrajectorySetpoint: Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], YawRate={msg.yawspeed:.2f}",
+                throttle_duration_sec=1.0,
+            )
+            self._trajectory_setpoint_publisher.publish(msg)
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+            )
 
         try:
             self.get_logger().info(
@@ -561,6 +594,7 @@ class CoreDroneController(LifecycleNode):
             with self._setpoint_lock:  #
                 self._desired_velocity_ned = [vx, vy, vz]  #
                 self._desired_yaw_rate = yaw_rate  #
+                self._desired_position_ned = [float("nan"), float("nan"), float("nan")]
             self.get_logger().info(
                 f"Target velocity NED set to: [{vx:.2f}, {vy:.2f}, {vz:.2f}], YawRate: {yaw_rate:.2f}",
                 throttle_duration_sec=1.0,
@@ -569,6 +603,23 @@ class CoreDroneController(LifecycleNode):
         except Exception as e:
             self.get_logger().error(
                 f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+            )
+            return False
+
+    def set_target_position_ned(self, x: float, y: float, z: float):
+        try:
+            with self._setpoint_lock:  #
+                self._desired_position_ned = [x, y, z]  #
+                self._desired_velocity_ned = [float("nan"), float("nan"), float("nan")]
+            self.get_logger().info(
+                f"Target Position NED set to: [{x:.2f}, {y:.2f}, {z:.2f}]",
+                throttle_duration_sec=1.0,
+            )
+            return True
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to set position trajectory setpoint: {e}",
+                throttle_duration_sec=5.0,
             )
             return False
 
