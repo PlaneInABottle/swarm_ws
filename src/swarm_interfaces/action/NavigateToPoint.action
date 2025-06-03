@@ -1,0 +1,19 @@
+# Goal
+float64 target_latitude_deg      # Target latitude in degrees
+float64 target_longitude_deg     # Target longitude in degrees
+float64 target_altitude_amsl     # Target altitude AMSL (Above Mean Sea Level) in meters
+float32 desired_travel_speed_mps # Desired travel speed in m/s (0 or negative for default)
+float32 acceptance_radius_m      # Radius in meters to consider the target reached
+---
+# Result
+bool success
+string message
+float64 final_latitude_deg       # Actual latitude when action ended
+float64 final_longitude_deg      # Actual longitude when action ended
+float64 final_altitude_amsl      # Actual altitude AMSL when action ended
+---
+# Feedback
+float64 current_latitude_deg
+float64 current_longitude_deg
+float64 current_altitude_amsl
+float64 distance_to_target_m

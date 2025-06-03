@@ -34,6 +34,7 @@ from px4_msgs.msg import (
     VehicleCommand,
     VehicleStatus,
     VehicleLocalPosition,
+    VehicleGlobalPosition,
     VehicleRatesSetpoint,  # Example if needed for other handlers
 )
 
@@ -48,9 +49,9 @@ from ..utils.avoidance import calculate_simple_avoidance_velocity
 try:
     from ..handlers.core_action_handler_base import ActionHandlerBase
     from ..handlers.takeoff_action_handler import TakeoffActionHandler
+    from ..handlers.navigate_to_point_action_handler import NavigateToPointActionHandler
     # Import other handlers similarly...
     # from ..handlers.land_action_handler import LandActionHandler
-    # from ..handlers.navigate_to_point_action_handler import NavigateToPointActionHandler
     # from ..handlers.execute_dynamic_motion_handler import ExecuteDynamicMotionHandler
 except ImportError as e:
     # Handle the case where handlers might not be found if structure changes
@@ -64,6 +65,9 @@ except ImportError as e:
         pass  # Dummy base
 
     class TakeoffActionHandler(ActionHandlerBase):
+        pass  # Dummy handler
+
+    class NavigateToPointActionHandler(ActionHandlerBase):
         pass  # Dummy handler
 
 
@@ -113,6 +117,7 @@ class CoreDroneController(LifecycleNode):
         self._desired_velocity_ned: list[float] = [0.0, 0.0, 0.0]  # vx, vy, vz
         self._desired_yaw_rate: float = 0.0  # rad/s
         self._current_local_position: Optional[VehicleLocalPosition] = None
+        self._current_global_position: Optional[VehicleGlobalPosition] = None
 
         # TODO - populate this list
         self._other_drones_local_ned_list: list[np.ndarray] = []
@@ -126,6 +131,7 @@ class CoreDroneController(LifecycleNode):
         self._setpoint_lock = Lock()  # For thread-safe access to desired setpoints
         self._local_position_lock = Lock()
         self._vehicle_status_lock = Lock()
+        self._global_position_lock = Lock()
         self._other_drones_lock = Lock()
 
         # Internal State Machine
@@ -163,7 +169,11 @@ class CoreDroneController(LifecycleNode):
         try:
             self.get_logger().info("Attempting to instantiate TakeoffActionHandler...")
             self._handlers["takeoff"] = TakeoffActionHandler(self, self.get_logger())
-            self.get_logger().info("TakeoffActionHandler instantiated.")
+            self._handlers["navigate_to_point"] = NavigateToPointActionHandler(
+                self, self.get_logger()
+            )
+
+            self.get_logger().info("Handlers instantiated.")
         except NameError as e:
             self.get_logger().error(
                 f"Failed to instantiate handlers, class likely missing: {e}"
@@ -279,6 +289,14 @@ class CoreDroneController(LifecycleNode):
                 VehicleStatus,
                 f"{fmu_out_base}/vehicle_status_v1",
                 self._vehicle_status_callback,
+                qos_subscriber_volatile,
+                callback_group=self._subscriber_cbgroup,
+            )
+
+            self._vehicle_global_position_subscriber = self.create_subscription(
+                VehicleGlobalPosition,
+                f"{fmu_out_base}/vehicle_global_position",
+                self._vehicle_global_position_callback,
                 qos_subscriber_volatile,
                 callback_group=self._subscriber_cbgroup,
             )
@@ -654,6 +672,19 @@ class CoreDroneController(LifecycleNode):
             throttle_duration_sec=3.0,
         )
 
+    def _vehicle_global_position_callback(self, msg: VehicleGlobalPosition):
+        with self._global_position_lock:
+            self._current_global_position = msg
+        # Optional: Keep the throttled logging for debugging
+        self.get_logger().info(
+            f"Global Position Update: Lat={msg.lat:.7f}, Lon={msg.lon:.7f}, Alt_AMSL={msg.alt:.2f}m",
+            throttle_duration_sec=2.0,
+        )
+
+    def get_current_global_position(self):
+        with self._global_position_lock:
+            return self._current_global_position
+
     def is_armed(self):
         return self._is_armed
 
@@ -750,6 +781,38 @@ class CoreDroneController(LifecycleNode):
         return await self.send_command_request(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0
         )
+
+    def command_hover_at_current_local_position(self) -> bool:
+        """
+        Commands the drone to hover at its current local NED position.
+        This involves setting the desired position to the current local position
+        and zeroing out desired velocities, letting the setpoint publishing
+        loop take over to command a position hold.
+
+        Returns:
+            bool: True if the command to hover was successfully initiated (i.e., position set),
+                  False if local position is unavailable or set_target_position_ned fails.
+        """
+        current_local_pos = (
+            self.get_current_local_position()
+        )  # Uses self.get_current_local_position()
+        if current_local_pos:
+            self.get_logger().info(
+                f"Commanding HOVER at local NED: x={current_local_pos.x:.2f}, "
+                f"y={current_local_pos.y:.2f}, z={current_local_pos.z:.2f}"
+            )
+            # Call self.set_target_position_ned() which is part of CoreDroneController
+            # This method already sets desired velocity to [0,0,0]
+            return self.set_target_position_ned(
+                current_local_pos.x, current_local_pos.y, current_local_pos.z
+            )
+        else:
+            self.get_logger().warn(
+                "Cannot command hover: Current local position not available. "
+                "Attempting to set zero velocity as fallback."
+            )
+            # Fallback to setting zero velocity if local position is unknown
+            return self.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
 
 
 # === Main Execution Logic ===
