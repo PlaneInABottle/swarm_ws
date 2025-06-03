@@ -75,7 +75,6 @@ except ImportError as e:
 DEFAULT_HEARTBEAT_PERIOD = 0.02  # seconds (10 Hz) for OffboardControlMode
 SETPOINT_PUBLISH_PERIOD = 0.02  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
 CONNECTION_TIMEOUT_SEC = 5.0  # Timeout for waiting for PX4 connection (status)
-AVOIDANCE_UPDATE_PERIOD = 0.1
 
 
 class CoreDroneController(LifecycleNode):
@@ -100,7 +99,6 @@ class CoreDroneController(LifecycleNode):
         self.declare_parameter("repulsive_gain", 0.8)
         self.declare_parameter("obstacle_influence_radius", 5.0)
         self.declare_parameter("max_speed", 2.0)
-        self.declare_parameter("avoidance_update_period", AVOIDANCE_UPDATE_PERIOD)
 
         # --- Lifecycle State ---
         self._is_active: bool = False
@@ -154,7 +152,6 @@ class CoreDroneController(LifecycleNode):
         # If timers left in the default callback_group it blocks the call to this node
         self._offboard_heartbeat_timer: Optional[Timer] = None
         self._setpoint_publishing_timer: Optional[Timer] = None
-        self._avoidance_update_timer: Optional[Timer] = None
 
         self._offboard_control_mode_publisher: Optional[Publisher] = None
         self._trajectory_setpoint_publisher: Optional[Publisher] = None
@@ -221,10 +218,6 @@ class CoreDroneController(LifecycleNode):
                 "obstacle_influence_radius"
             ).value
             self._avoidance_max_overall_speed = self.get_parameter("max_speed").value
-
-            self._avoidance_update_period = float(
-                self.get_parameter("avoidance_update_period").value
-            )
 
             # Configure Command Service
             self._vehicle_command_client = self.create_client(
@@ -316,13 +309,6 @@ class CoreDroneController(LifecycleNode):
             )
             self._setpoint_publishing_timer.cancel()
 
-            self._avoidance_update_timer = self.create_timer(
-                self._avoidance_update_period,
-                self._update_avoidance_logic_callback,
-                self._publisher_cbgroup,
-            )
-            self._avoidance_update_timer.cancel()  # Start it in on_activate as you do
-
             # Start Action Handlers
             if not self._handlers:
                 self.get_logger().warn("No action handlers were instantiated.")
@@ -370,7 +356,6 @@ class CoreDroneController(LifecycleNode):
             # Use cast to satisfy type checker, we checked for None above
             cast(Timer, self._offboard_heartbeat_timer).reset()
             cast(Timer, self._setpoint_publishing_timer).reset()
-            cast(Timer, self._avoidance_update_timer).reset()
 
             self.get_logger().info("Simple Controller Activated Successfully")
 
@@ -609,26 +594,97 @@ class CoreDroneController(LifecycleNode):
             )
 
     def set_target_velocity_ned(
-        self, vx: float, vy: float, vz: float, yaw_rate: float = 0.0
-    ):
+        self,
+        vx_intent: float,
+        vy_intent: float,
+        vz_intent: float,
+        yaw_rate_intent: float = 0.0,
+    ) -> bool:
         """
-        Sets the desired velocity in NED frame (m/s) and yaw rate (rad/s).
-        This method is called by action handlers or other control logic.
+        Sets the desired velocity in NED frame (m/s) and yaw rate (rad/s),
+        applying avoidance logic before finalizing the command.
         """
         try:
-            with self._setpoint_lock:  #
-                self._desired_velocity_ned = [vx, vy, vz]  #
-                self._desired_yaw_rate = yaw_rate  #
-                self._desired_position_ned = [float("nan"), float("nan"), float("nan")]
-            self.get_logger().info(
-                f"Target velocity NED set to: [{vx:.2f}, {vy:.2f}, {vz:.2f}], YawRate: {yaw_rate:.2f}",
+            final_vx, final_vy, final_vz = (
+                vx_intent,
+                vy_intent,
+                vz_intent,
+            )  # Start with the intended velocity
+
+            # --- Avoidance Logic Integration ---
+            # Check if we should even apply avoidance (e.g. if not actively moving based on intent)
+            # For simplicity, let's assume if this function is called, an active velocity is intended.
+            # A more nuanced check could be added here if vx_intent, etc., are all zero.
+
+            my_current_local_pos_msg = self.get_current_local_position()
+
+            if my_current_local_pos_msg is None:
+                self.get_logger().warn(
+                    "Avoidance in set_target_velocity_ned: Own local position not available. Using intended velocity without avoidance.",
+                    throttle_duration_sec=5.0,
+                )
+                # Proceed with intended velocity if own position is unknown for avoidance calculation
+            else:
+                my_current_pos_ned = np.array(
+                    [
+                        my_current_local_pos_msg.x,
+                        my_current_local_pos_msg.y,
+                        my_current_local_pos_msg.z,
+                    ]
+                )
+
+                current_other_drones_positions_ned: list[np.ndarray]
+                with (
+                    self._other_drones_lock
+                ):  # Assuming _other_drones_lock is still relevant
+                    current_other_drones_positions_ned = list(
+                        self._other_drones_local_ned_list
+                    )
+
+                if not current_other_drones_positions_ned:
+                    self.get_logger().debug(
+                        "Avoidance in set_target_velocity_ned: No other drones. Using intended velocity.",
+                        throttle_duration_sec=5.0,
+                    )
+                    # final_vx, final_vy, final_vz remain as vx_intent, vy_intent, vz_intent
+                else:
+                    base_vel_np = np.array([vx_intent, vy_intent, vz_intent])
+                    adjusted_vel_np = calculate_simple_avoidance_velocity(
+                        current_position_ned=my_current_pos_ned,
+                        other_drones_ned_positions=current_other_drones_positions_ned,
+                        base_desired_velocity_ned=base_vel_np,
+                        safety_radius=self._avoidance_safety_radius,
+                        repulsion_strength=self._avoidance_repulsion_strength,
+                        max_overall_speed=self._avoidance_max_overall_speed,
+                    )
+                    final_vx, final_vy, final_vz = adjusted_vel_np.tolist()
+                    self.get_logger().info(
+                        f"Avoidance applied in set_target_velocity_ned. Adjusted Vel NED: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}]",
+                        throttle_duration_sec=1.0,
+                    )
+            # --- End of Avoidance Logic Integration ---
+
+            with self._setpoint_lock:
+                self._desired_velocity_ned = [final_vx, final_vy, final_vz]
+                self._desired_yaw_rate = (
+                    yaw_rate_intent  # Yaw rate not adjusted by this simple avoidance
+                )
+                self._desired_position_ned = [
+                    math.nan,
+                    math.nan,
+                    math.nan,
+                ]  # Setting velocity means position is not the target
+
+            self.get_logger().info(  # Log the final command being set
+                f"Final target velocity NED set to: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}], YawRate: {yaw_rate_intent:.2f}",
                 throttle_duration_sec=1.0,
             )
             return True
         except Exception as e:
             self.get_logger().error(
-                f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+                f"Failed in set_target_velocity_ned (with avoidance): {e}"
             )
+            self.get_logger().error(traceback.format_exc())
             return False
 
     def set_target_position_ned(self, x: float, y: float, z: float):
@@ -694,76 +750,6 @@ class CoreDroneController(LifecycleNode):
     def get_current_local_position(self):
         with self._local_position_lock:
             return self._current_local_position
-
-    def _update_avoidance_logic_callback(
-        self,
-    ):
-        if not self._is_active:
-            return
-
-        with self._local_position_lock:
-            my_current_local_position_msg = self._current_local_position
-
-        is_position_hold_intent = self._desired_velocity_ned == [0.0, 0.0, 0.0]
-
-        if is_position_hold_intent:
-            return
-
-        my_current_pos_ned = np.array(
-            [
-                my_current_local_position_msg.x,
-                my_current_local_position_msg.y,
-                my_current_local_position_msg.z,
-            ]
-        )
-
-        # This list needs to be populated by your GPS processing and transformation logic
-        with self._other_drones_lock:
-            current_other_drones_positions_ned = list(self._other_drones_local_ned_list)
-
-        # --- Determine Base Desired Velocity ---
-        # This is what your drone WANTS to do (e.g., formation, waypoint following, hover)
-        # For now, let's assume a default hover or a commanded velocity if an action is active.
-        # If an action handler (like a formation controller) is active, it should be setting
-        # self._desired_velocity_ned and self._desired_yaw_rate.
-        # The avoidance will then adjust this.
-
-        current_base_desired_velocity_ned = np.array(
-            [0.0, 0.0, 0.0]
-        )  # Default to hover
-        current_base_yaw_rate = 0.0
-
-        # If action handlers directly update _desired_velocity_ned, we can use that as input
-        with self._setpoint_lock:  # Access the values set by handlers/other logic
-            current_base_desired_velocity_ned = np.array(self._desired_velocity_ned)
-            current_base_yaw_rate = self._desired_yaw_rate
-
-        # Call the actual avoidance function from avoidance.py
-        final_velocity_ned = calculate_simple_avoidance_velocity(
-            current_position_ned=my_current_pos_ned,
-            other_drones_ned_positions=current_other_drones_positions_ned,
-            base_desired_velocity_ned=current_base_desired_velocity_ned,
-            safety_radius=self._avoidance_safety_radius,  # Using loaded parameter
-            repulsion_strength=self._avoidance_repulsion_strength,  # Using loaded parameter
-            max_overall_speed=self._avoidance_max_overall_speed,  # Using loaded parameter
-        )
-
-        # The avoidance algorithm might change the direction, so re-evaluate yaw if needed,
-        # or keep the base_yaw_rate if that's preferred for the maneuver.
-        # For simplicity, we'll use the current_base_yaw_rate unless you have specific logic.
-
-        # Update the controller's target velocity with the avoidance-adjusted velocity
-        self.set_target_velocity_ned(
-            final_velocity_ned[0],
-            final_velocity_ned[1],
-            final_velocity_ned[2],
-            current_base_yaw_rate,  # Or a yaw rate calculated based on final_vel_ned
-        )
-
-        self.get_logger().info(
-            f"Avoidance Adjusted Vel NED: [{final_velocity_ned[0]:.2f}, {final_velocity_ned[1]:.2f}, {final_velocity_ned[2]:.2f}]",
-            throttle_duration_sec=1.0,
-        )
 
     async def engage_arm_mode(self):
         """Sends the ARM command."""
