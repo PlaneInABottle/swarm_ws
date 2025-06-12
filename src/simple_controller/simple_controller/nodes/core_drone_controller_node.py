@@ -6,7 +6,7 @@ import numpy as np
 from enum import Enum, auto
 from threading import Lock
 from typing import Dict, Optional, Type, Any, cast  # Added cast for type checking
-import asyncio
+
 # Import specific rclpy types for hints
 from rclpy.client import Client
 from rclpy.publisher import Publisher
@@ -21,7 +21,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from rclpy.duration import Duration
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
-import time
+
 import lifecycle_msgs.srv
 import lifecycle_msgs.msg
 
@@ -72,9 +72,9 @@ except ImportError as e:
 
 
 # --- Constants ---
-DEFAULT_HEARTBEAT_PERIOD = 0.05  # seconds (20 Hz) for OffboardControlMode - was 0.01 (100 Hz)
-SETPOINT_PUBLISH_PERIOD = 0.05  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
-CONNECTION_TIMEOUT_SEC = 8.0  # Timeout for waiting for PX4 connection (status)
+DEFAULT_HEARTBEAT_PERIOD = 0.02  # seconds (10 Hz) for OffboardControlMode
+SETPOINT_PUBLISH_PERIOD = 0.02  # seconds (20 Hz) for TrajectorySetpoint - MUST BE > 2Hz
+CONNECTION_TIMEOUT_SEC = 5.0  # Timeout for waiting for PX4 connection (status)
 
 
 class CoreDroneController(LifecycleNode):
@@ -87,8 +87,8 @@ class CoreDroneController(LifecycleNode):
 
     def __init__(self, **kwargs: Any):
         """Initializes the CoreDroneController node."""
-        super().__init__("core_drone_controller", **kwargs)
-        # self.get_logger().debug("Creating Simple Controller...")
+        super().__init__("simple_controller", **kwargs)
+        self.get_logger().info("Creating Simple Controller...")
 
         # --- Parameters (Declare defaults, get in on_configure) ---
         self.declare_parameter("target_system_id", 2)
@@ -164,20 +164,20 @@ class CoreDroneController(LifecycleNode):
 
         # Use try-except during instantiation if a handler class might be missing
         try:
-            # self.get_logger().debug("Attempting to instantiate TakeoffActionHandler...")
+            self.get_logger().info("Attempting to instantiate TakeoffActionHandler...")
             self._handlers["takeoff"] = TakeoffActionHandler(self, self.get_logger())
             self._handlers["navigate_to_point"] = NavigateToPointActionHandler(
                 self, self.get_logger()
             )
 
-            # self.get_logger().debug("Handlers instantiated.")
+            self.get_logger().info("Handlers instantiated.")
         except NameError as e:
             self.get_logger().error(
                 f"Failed to instantiate handlers, class likely missing: {e}"
             )
             # Node will continue but actions won't work
 
-        # self.get_logger().debug("Core Drone Controller node created.")
+        self.get_logger().info("Core Drone Controller node created.")
 
     # === State Management ===
     def set_internal_state(
@@ -190,7 +190,7 @@ class CoreDroneController(LifecycleNode):
         old_state = self._internal_state
         if old_state != new_state:
             old_state_name = old_state.name
-            # self.get_logger().debug(f"What is the old_state_name: {old_state_name}")
+            self.get_logger().info(f"What is the old_state_name: {old_state_name}")
             self._internal_state = new_state
 
     def get_internal_state(self) -> InternalState:
@@ -200,7 +200,7 @@ class CoreDroneController(LifecycleNode):
 
     def on_configure(self, state: LifecycleState) -> TransitionCallbackReturn:
         """Configures resources: parameters, pubs/subs, handlers, timers."""
-        #   self.get_logger().debug("Configuring Core Drone Controller...")
+        self.get_logger().info("Configuring Core Drone Controller...")
         try:
             super().on_configure(state)
             self._target_system_id = int(self.get_parameter("target_system_id").value)
@@ -226,13 +226,12 @@ class CoreDroneController(LifecycleNode):
 
             # Wait for the service to be found on the ros network
             while not self._vehicle_command_client.wait_for_service(timeout_sec=1.0):
-            #     self.get_logger().debug(
-            #         f"Service /{self._px4_ns_prefix}/fmu/vehicle_command not available, waiting again..."
-            #     )
-            # self.get_logger().debug(
-            #     f"Service /{self._px4_ns_prefix}/fmu/vehicle_command is available."
-            # )
-                pass
+                self.get_logger().info(
+                    f"Service /{self._px4_ns_prefix}/fmu/vehicle_command not available, waiting again..."
+                )
+            self.get_logger().info(
+                f"Service /{self._px4_ns_prefix}/fmu/vehicle_command is available."
+            )
 
             # Define QoS Profiles
             qos_pub_reliable = QoSProfile(
@@ -319,24 +318,22 @@ class CoreDroneController(LifecycleNode):
                     isinstance(handler, ActionHandlerBase)
                     and handler.__class__ != ActionHandlerBase
                 ):
-                    # self.get_logger().debug(f"Starting handler: {name}")
+                    self.get_logger().info(f"Starting handler: {name}")
                     if not handler.start(
                         callback_group=self._action_handler_cbgroup,
                     ):  # Pass group here
-                        # self.get_logger().error(f"Failed to start handler: {name}")
+                        self.get_logger().error(f"Failed to start handler: {name}")
                         return TransitionCallbackReturn.FAILURE
                     else:
-                        # self.get_logger().debug(
-                        #     f"on_configure: Handler '{name}' started successfully."
-                        # )
-                        pass    
+                        self.get_logger().info(
+                            f"on_configure: Handler '{name}' started successfully."
+                        )
                 else:
-                    # self.get_logger().warn(
-                    #     f"Skipping start for handler '{name}', possibly due to import error or base class instance."
-                    # )
-                    pass
+                    self.get_logger().warn(
+                        f"Skipping start for handler '{name}', possibly due to import error or base class instance."
+                    )
 
-            # self.get_logger().debug("Simple Controller Configured Successfully")
+            self.get_logger().info("Simple Controller Configured Successfully")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during configuration: {e}")
@@ -360,7 +357,8 @@ class CoreDroneController(LifecycleNode):
             cast(Timer, self._offboard_heartbeat_timer).reset()
             cast(Timer, self._setpoint_publishing_timer).reset()
 
-            # self.get_logger().debug("Simple Controller Activated Successfully")
+            self.get_logger().info("Simple Controller Activated Successfully")
+
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during activation: {e}")
@@ -370,7 +368,7 @@ class CoreDroneController(LifecycleNode):
     def on_deactivate(self, state: LifecycleState) -> TransitionCallbackReturn:
         try:
             self._is_active = False
-            # self.get_logger().debug("Simple Controller Deactivated Successfully")
+            self.get_logger().info("Simple Controller Deactivated Successfully")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during deactivation: {e}")
@@ -380,7 +378,7 @@ class CoreDroneController(LifecycleNode):
     def on_cleanup(self, state: LifecycleState) -> TransitionCallbackReturn:
         try:
             self._is_active = False
-            # self.get_logger().debug("Simple Controller Cleaned Up Successfully")
+            self.get_logger().info("Simple Controller Cleaned Up Successfully")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during cleanup: {e}")
@@ -390,7 +388,7 @@ class CoreDroneController(LifecycleNode):
     def on_shutdown(self, state: LifecycleState) -> TransitionCallbackReturn:
         try:
             self._is_active = False
-            # self.get_logger().debug("Simple Controller Shutdown Successfully")
+            self.get_logger().info("Simple Controller Shutdown Successfully")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during shutdown: {e}")
@@ -400,7 +398,7 @@ class CoreDroneController(LifecycleNode):
     def on_error(self, state: LifecycleState) -> TransitionCallbackReturn:
         try:
             self._is_active = False
-            # self.get_logger().debug("Simple Controller Finished On Error Successfully")
+            self.get_logger().info("Simple Controller Finished On Error Successfully")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Exception during on error: {e}")
@@ -412,14 +410,14 @@ class CoreDroneController(LifecycleNode):
         return self._is_active
 
     async def _test_callbackv2(self) -> bool:
-        # self.get_logger().debug("Test CallbackV2")
+        self.get_logger().info("Test CallbackV2")
         return False
 
     async def _test_callback(self) -> bool:
-        # self.get_logger().debug(f"Test Callback")
+        self.get_logger().info(f"Test Callback")
         if self._is_active:
-            # self.get_logger().debug("EXECUTED Test Callback")
-            # self.get_logger().debug("EXECUTED V@@@ Callback")
+            self.get_logger().info("EXECUTED Test Callback")
+            self.get_logger().info("EXECUTED V@@@ Callback")
             await self.send_command_request(
                 VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0
             )
@@ -442,14 +440,13 @@ class CoreDroneController(LifecycleNode):
         Sends a VehicleCommand request to the PX4 FMU.
         """
         try:
-            # self.get_logger().debug(
-            #     f"Sent command {command} with params: [{param1:.2f}, {param2:.2f}, ...]"
-            # )
+            self.get_logger().info(
+                f"Sent command {command} with params: [{param1:.2f}, {param2:.2f}, ...]"
+            )
             if not self._vehicle_command_client:
-                # self.get_logger().error(
-                #     f"Error while sending command {command}: There isn't any client"
-                # )
-                pass
+                self.get_logger().error(
+                    f"Error while sending command {command}: There isn't any client"
+                )
 
             finalRequest = VehicleCommandSrv.Request()
             req = finalRequest.request
@@ -469,27 +466,26 @@ class CoreDroneController(LifecycleNode):
             req.source_component = 1
             req.from_external = True
 
-            # self.get_logger().debug(f"Request :  {repr(req)}")
+            self.get_logger().info(f"Request :  {repr(req)}")
             result = await self._vehicle_command_client.call_async(finalRequest)
-            # self.get_logger().debug(
-            #     f"Sent command {command} with params: [{param1:.2f}, {param2:.2f}, ...]"
-            # )
+            self.get_logger().info(
+                f"Sent command {command} with params: [{param1:.2f}, {param2:.2f}, ...]"
+            )
 
-            self.get_logger().debug(f"Sent command result: {result.reply}")
+            self.get_logger().info(f"Sent command result: {result.reply}")
 
             return True
         except Exception as e:
-            # self.get_logger().error(f"Error while sending command {command}: {e}")
-            # self.get_logger().error(f"Traceback: {traceback.format_exc()}")
-            pass
+            self.get_logger().error(f"Error while sending command {command}: {e}")
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
 
     def _publish_offboard_control_mode_heartbeat(self):
         """Publishes the OffboardControlMode message periodically."""
         if self._offboard_control_mode_publisher is None:
-            # self.get_logger().debug(
-            #     "Heartbeat - Offboard Timer: Publisher not available, skipping.",
-            #     throttle_duration_sec=5.0,
-            # )
+            self.get_logger().info(
+                "Heartbeat - Offboard Timer: Publisher not available, skipping.",
+                throttle_duration_sec=5.0,
+            )
             return
 
         is_position_hold_intent = self._desired_velocity_ned == [0.0, 0.0, 0.0]
@@ -507,10 +503,10 @@ class CoreDroneController(LifecycleNode):
         msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         try:
-            # self.get_logger().debug(
-            #     f"Heartbeat-Offboard Pub: Pos={msg.position}, Vel={msg.velocity}, Acc={msg.acceleration}, Att={msg.attitude}, Rate={msg.body_rate}",
-            #     throttle_duration_sec=1.0,
-            # )
+            self.get_logger().info(
+                f"Heartbeat-Offboard Pub: Pos={msg.position}, Vel={msg.velocity}, Acc={msg.acceleration}, Att={msg.attitude}, Rate={msg.body_rate}",
+                throttle_duration_sec=1.0,
+            )
             self._offboard_control_mode_publisher.publish(msg)
         except Exception as e:
             self.get_logger().error(
@@ -576,16 +572,26 @@ class CoreDroneController(LifecycleNode):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
         try:
-            # self.get_logger().debug(
-            #     f"Publishing TrajectorySetpoint: Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], YawRate={msg.yawspeed:.2f}",
-            #     throttle_duration_sec=1.0,
-            # )
+            self.get_logger().info(
+                f"Publishing TrajectorySetpoint: Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], YawRate={msg.yawspeed:.2f}",
+                throttle_duration_sec=1.0,
+            )
             self._trajectory_setpoint_publisher.publish(msg)
         except Exception as e:
             self.get_logger().error(
                 f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
             )
 
+        try:
+            self.get_logger().info(
+                f"Publishing TrajectorySetpoint: Vel=[{msg.velocity[0]:.2f}, {msg.velocity[1]:.2f}, {msg.velocity[2]:.2f}], YawRate={msg.yawspeed:.2f}",
+                throttle_duration_sec=1.0,
+            )
+            self._trajectory_setpoint_publisher.publish(msg)
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish trajectory setpoint: {e}", throttle_duration_sec=5.0
+            )
 
     def set_target_velocity_ned(
         self,
@@ -636,12 +642,11 @@ class CoreDroneController(LifecycleNode):
                     )
 
                 if not current_other_drones_positions_ned:
-                    # self.get_logger().debug(
-                    #     "Avoidance in set_target_velocity_ned: No other drones. Using intended velocity.",
-                    #     throttle_duration_sec=5.0,
-                    # )
+                    self.get_logger().debug(
+                        "Avoidance in set_target_velocity_ned: No other drones. Using intended velocity.",
+                        throttle_duration_sec=5.0,
+                    )
                     # final_vx, final_vy, final_vz remain as vx_intent, vy_intent, vz_intent
-                    pass
                 else:
                     base_vel_np = np.array([vx_intent, vy_intent, vz_intent])
                     adjusted_vel_np = calculate_simple_avoidance_velocity(
@@ -653,10 +658,10 @@ class CoreDroneController(LifecycleNode):
                         max_overall_speed=self._avoidance_max_overall_speed,
                     )
                     final_vx, final_vy, final_vz = adjusted_vel_np.tolist()
-                    # self.get_logger().debug(
-                    #     f"Avoidance applied in set_target_velocity_ned. Adjusted Vel NED: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}]",
-                    #     throttle_duration_sec=1.0,
-                    # )
+                    self.get_logger().info(
+                        f"Avoidance applied in set_target_velocity_ned. Adjusted Vel NED: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}]",
+                        throttle_duration_sec=1.0,
+                    )
             # --- End of Avoidance Logic Integration ---
 
             with self._setpoint_lock:
@@ -670,10 +675,10 @@ class CoreDroneController(LifecycleNode):
                     math.nan,
                 ]  # Setting velocity means position is not the target
 
-            # self.get_logger().debug(  # Log the final command being set
-            #     f"Final target velocity NED set to: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}], YawRate: {yaw_rate_intent:.2f}",
-            #     throttle_duration_sec=1.0,
-            # )
+            self.get_logger().info(  # Log the final command being set
+                f"Final target velocity NED set to: [{final_vx:.2f}, {final_vy:.2f}, {final_vz:.2f}], YawRate: {yaw_rate_intent:.2f}",
+                throttle_duration_sec=1.0,
+            )
             return True
         except Exception as e:
             self.get_logger().error(
@@ -687,10 +692,10 @@ class CoreDroneController(LifecycleNode):
             with self._setpoint_lock:  #
                 self._desired_position_ned = [x, y, z]  #
                 self._desired_velocity_ned = [0.0, 0.0, 0.0]
-            # self.get_logger().debug(
-            #     f"Target Position NED set to: [{x:.2f}, {y:.2f}, {z:.2f}]",
-            #     throttle_duration_sec=1.0,
-            # )
+            self.get_logger().info(
+                f"Target Position NED set to: [{x:.2f}, {y:.2f}, {z:.2f}]",
+                throttle_duration_sec=1.0,
+            )
             return True
         except Exception as e:
             self.get_logger().error(
@@ -703,10 +708,10 @@ class CoreDroneController(LifecycleNode):
         with self._local_position_lock:
             self._current_local_position = msg
 
-        # self.get_logger().debug(
-        #     f"Local POSITION: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}",
-        #     throttle_duration_sec=1.0,
-        # )
+        self.get_logger().info(
+            f"Local POSITION: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}",
+            throttle_duration_sec=1.0,
+        )
 
     def _vehicle_status_callback(self, msg: VehicleStatus):
         with self._vehicle_status_lock:
@@ -714,23 +719,23 @@ class CoreDroneController(LifecycleNode):
             self._is_armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
             self._is_offboard = msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
 
-        # self.get_logger().debug(
-        #     f"Is Armed: {self._is_armed}",
-        #     throttle_duration_sec=3.0,
-        # )
-        # self.get_logger().debug(
-        #     f"Is Offboard: {self._is_offboard}",
-        #     throttle_duration_sec=3.0,
-        # )
+        self.get_logger().info(
+            f"Is Armed: {self._is_armed}",
+            throttle_duration_sec=3.0,
+        )
+        self.get_logger().info(
+            f"Is Offboard: {self._is_offboard}",
+            throttle_duration_sec=3.0,
+        )
 
     def _vehicle_global_position_callback(self, msg: VehicleGlobalPosition):
         with self._global_position_lock:
             self._current_global_position = msg
         # Optional: Keep the throttled logging for debugging
-        # self.get_logger().debug(
-        #     f"Global Position Update: Lat={msg.lat:.7f}, Lon={msg.lon:.7f}, Alt_AMSL={msg.alt:.2f}m",
-        #     throttle_duration_sec=2.0,
-        # )
+        self.get_logger().info(
+            f"Global Position Update: Lat={msg.lat:.7f}, Lon={msg.lon:.7f}, Alt_AMSL={msg.alt:.2f}m",
+            throttle_duration_sec=2.0,
+        )
 
     def get_current_global_position(self):
         with self._global_position_lock:
@@ -747,20 +752,21 @@ class CoreDroneController(LifecycleNode):
             return self._current_local_position
 
     async def engage_arm_mode(self):
-
-        for i in range(3):
-            await self.send_command_request(
-                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0
-            )
-        return True
+        """Sends the ARM command."""
+        self.get_logger().info("Sending ARM command...")
+        # VEHICLE_CMD_COMPONENT_ARM_DISARM: param1 = 1 to arm, 0 to disarm
+        return await self.send_command_request(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0
+        )
 
     async def engage_offboard_mode(self):
         """Sends command to switch to Offboard flight mode."""
-        for i in range(3):
-            await self.send_command_request(
-                VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0
-            )
-        return True
+        self.get_logger().info("Sending SET_MODE=OFFBOARD command...")
+
+        # VEHICLE_CMD_DO_SET_MODE: param1 = base_mode (1 for custom mode), param2 = custom_mode (6 for Offboard)
+        return await self.send_command_request(
+            VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0
+        )
 
     def command_hover_at_current_local_position(self) -> bool:
         """
@@ -777,20 +783,20 @@ class CoreDroneController(LifecycleNode):
             self.get_current_local_position()
         )  # Uses self.get_current_local_position()
         if current_local_pos:
-            # self.get_logger().debug(
-            #     f"Commanding HOVER at local NED: x={current_local_pos.x:.2f}, "
-            #     f"y={current_local_pos.y:.2f}, z={current_local_pos.z:.2f}"
-            # )
+            self.get_logger().info(
+                f"Commanding HOVER at local NED: x={current_local_pos.x:.2f}, "
+                f"y={current_local_pos.y:.2f}, z={current_local_pos.z:.2f}"
+            )
             # Call self.set_target_position_ned() which is part of CoreDroneController
             # This method already sets desired velocity to [0,0,0]
             return self.set_target_position_ned(
                 current_local_pos.x, current_local_pos.y, current_local_pos.z
             )
         else:
-            # self.get_logger().warn(
-            #     "Cannot command hover: Current local position not available. "
-            #     "Attempting to set zero velocity as fallback."
-            # )
+            self.get_logger().warn(
+                "Cannot command hover: Current local position not available. "
+                "Attempting to set zero velocity as fallback."
+            )
             # Fallback to setting zero velocity if local position is unknown
             return self.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
 
@@ -805,7 +811,7 @@ def main(args: Optional[list[str]] = None):
     try:
         rclpy.init(args=args)
         node = CoreDroneController()
-        # node.get_logger().debug("[Main] Node instance created.")
+        node.get_logger().info("[Main] Node instance created.")
 
         executor = MultiThreadedExecutor(num_threads=1)
         executor.add_node(node)
@@ -813,13 +819,11 @@ def main(args: Optional[list[str]] = None):
 
     except KeyboardInterrupt:
         if node:
-            # node.get_logger().debug("Keyboard interrupt, shutting down...")
-            print("Keyboard interrupt, shutting down...")
+            node.get_logger().info("Keyboard interrupt, shutting down...")
         else:
             print("Keyboard interrupt, shutting down...")
         if node:
-            # node.get_logger().debug("[Main] KeyboardInterrupt caught.")
-            print("[Main] KeyboardInterrupt caught.")
+            node.get_logger().info("[Main] KeyboardInterrupt caught.")
     except Exception as e:
         if node:
             node.get_logger().error(f"Exception in main spin: {e}")
@@ -827,7 +831,7 @@ def main(args: Optional[list[str]] = None):
             print(f"Exception before node init: {e}")
         traceback.print_exc()
         if node:
-            node.get_logger().debug(f"[Main] Exception caught: {e}")
+            node.get_logger().info(f"[Main] Exception caught: {e}")
 
 
 if __name__ == "__main__":
