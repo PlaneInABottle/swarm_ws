@@ -1,0 +1,35 @@
+swarm_orchestrator:
+  ros__parameters:
+    # YENİ: Diğer parametreleri de buraya taşıyoruz
+    drone_count: 3
+    target_height: 25.0
+    max_alt_limit: 10.0  # Maksimum 10 metre yükseklik artışına izin ver
+    takeoff_retry_count: 3
+    retry_delay_sec: 1.0
+
+    # Mevcut hedef listesi aynı kalıyor (yükseklikler sabitlendi)
+    drone_targets:
+      # Drone 1'in Hedefi
+      - {
+          lat: 47.397928,
+          lon: 8.546120,
+          alt_amsl: 20.0,  # Yükseklik 305 metre olarak ayarlandı
+          speed_mps: 1.5,
+          radius_m: 1.0,
+        }
+      # Drone 2'nin Hedefi
+      - {
+          lat: 47.397700,
+          lon: 8.545900,
+          alt_amsl: 20.0,  # Yükseklik düşürüldü
+          speed_mps: 1.5, 
+          radius_m: 1.0,
+        }
+      # Drone 3'ün Hedefi
+      - {
+          lat: 47.397500,
+          lon: 8.546300,
+          alt_amsl: 20.0,  # Yükseklik düşürüldü
+          speed_mps: 1.5,
+          radius_m: 1.0,
+        }

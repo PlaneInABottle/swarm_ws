@@ -11,11 +11,15 @@ find_package(ament_cmake REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED) # BU SATIRI EKLEYİN
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/Takeoff.action"
   "action/NavigateToPoint.action"
-  
+  "msg/DroneIndividualState.msg"  # Add this line
+  "msg/SwarmState.msg"            # Add this line
+  DEPENDENCIES geometry_msgs action_msgs std_msgs builtin_interfaces
 )
 
 if(BUILD_TESTING)
