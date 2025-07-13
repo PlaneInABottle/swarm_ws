@@ -72,7 +72,7 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             action_name="navigate_to_point",  # Action server name
             action_type=NavigateToPoint,  # Action type definition
         )
-        # Store target information during execution
+        # Store target debugrmation during execution
         self._target_lat_deg: Optional[float] = None
         self._target_lon_deg: Optional[float] = None
         self._target_alt_amsl: Optional[float] = None
@@ -83,22 +83,22 @@ class NavigateToPointActionHandler(ActionHandlerBase):
         """
         Accept or reject a NavigateToPoint goal request.
         """
-        self.logger.info(
-            f"[{self.__class__.__name__}] Received NavigateToPoint goal: "
-            f"Lat={goal_request.target_latitude_deg:.6f}, Lon={goal_request.target_longitude_deg:.6f}, "
-            f"Alt={goal_request.target_altitude_amsl:.2f}m, Speed={goal_request.desired_travel_speed_mps:.2f}m/s, "
-            f"Radius={goal_request.acceptance_radius_m:.2f}m"
-        )
+        # self.logger.debug(
+        #     f"[{self.__class__.__name__}] Received NavigateToPoint goal: "
+        #     f"Lat={goal_request.target_latitude_deg:.6f}, Lon={goal_request.target_longitude_deg:.6f}, "
+        #     f"Alt={goal_request.target_altitude_amsl:.2f}m, Speed={goal_request.desired_travel_speed_mps:.2f}m/s, "
+        #     f"Radius={goal_request.acceptance_radius_m:.2f}m"
+        # )
 
         if not self.is_started or self._action_server is None:
-            self.logger.error(
-                "Rejecting goal: NavigateToPoint action server not started."
-            )
+            # self.logger.error(
+            #     "Rejecting goal: NavigateToPoint action server not started."
+            # )
             return GoalResponse.REJECT
 
         # Basic validation of goal parameters
         if goal_request.acceptance_radius_m <= 0:
-            self.logger.error("Rejecting goal: Acceptance radius must be positive.")
+            # self.logger.error("Rejecting goal: Acceptance radius must be positive.")
             return GoalResponse.REJECT
 
         # Check if parent node is in a state that allows navigation (e.g., armed and hovering)
@@ -109,34 +109,34 @@ class NavigateToPointActionHandler(ActionHandlerBase):
         #     return GoalResponse.REJECT
 
         if not self.parent_node.is_armed():
-            self.logger.error("Rejecting goal: Drone is not armed.")
+            # self.logger.error("Rejecting goal: Drone is not armed.")
             return GoalResponse.REJECT
 
         if not self.parent_node.is_offboard():
-            self.logger.error("Rejecting goal: Drone is not in offboard mode.")
+            # self.logger.error("Rejecting goal: Drone is not in offboard mode.")
             # Optionally, you could try to switch to offboard mode here if appropriate for your design
             return GoalResponse.REJECT
 
-        self.logger.info("Accepting NavigateToPoint goal.")
+        # self.logger.debug("Accepting NavigateToPoint goal.")
         return GoalResponse.ACCEPT
 
     def handle_accepted_callback(self, goal_handle: ServerGoalHandle) -> None:
         """Start the asynchronous execution."""
-        self.logger.info(
-            f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id}. Starting execution..."
-        )
+        # self.logger.debug(
+        #     f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id}. Starting execution..."
+        # )
         # self.parent_node.set_internal_state(InternalState.EXECUTING_ACTION) # Example
         goal_handle.execute()
 
     def cancel_callback(self, goal_handle: ServerGoalHandle) -> CancelResponse:
-        self.logger.info(
-            f"[{self.__class__.__name__}] Received cancel request for goal {goal_handle.goal_id}."
-        )
+        # self.logger.debug(
+        #     f"[{self.__class__.__name__}] Received cancel request for goal {goal_handle.goal_id}."
+        # )
         # Call the parent_node's method
         self.parent_node.command_hover_at_current_local_position()
-        self.logger.info(
-            "Cancellation: Commanded drone to hover at current local position via parent."
-        )
+        # self.logger.debug(
+        #     "Cancellation: Commanded drone to hover at current local position via parent."
+        # )
         return CancelResponse.ACCEPT
 
     async def execute_callback(
@@ -166,18 +166,18 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             else DEFAULT_ACCEPTANCE_RADIUS_M
         )
 
-        self.logger.info(
-            f"Executing NavigateToPoint: Target Lat={self._target_lat_deg:.6f}, Lon={self._target_lon_deg:.6f}, "
-            f"Alt={self._target_alt_amsl:.2f}m, Speed={self._desired_speed_mps:.2f}m/s, "
-            f"Radius={self._acceptance_radius_m:.2f}m"
-        )
+        # self.logger.debug(
+        #     f"Executing NavigateToPoint: Target Lat={self._target_lat_deg:.6f}, Lon={self._target_lon_deg:.6f}, "
+        #     f"Alt={self._target_alt_amsl:.2f}m, Speed={self._desired_speed_mps:.2f}m/s, "
+        #     f"Radius={self._acceptance_radius_m:.2f}m"
+        # )
 
         # --- Pre-flight checks (similar to Takeoff, if any specific needed before starting movement) ---
         current_global_pos = self.parent_node.get_current_global_position()
         if current_global_pos is None:
             result.success = False
             result.message = "Failed to get current global position at action start."
-            self.logger.error(result.message)
+            # self.logger.error(result.message)
             goal_handle.abort()
             # self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Example
             return result
@@ -188,7 +188,7 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             result.message = (
                 "Drone disarmed or not in offboard mode during execution start."
             )
-            self.logger.error(result.message)
+            # self.logger.error(result.message)
             # Call the parent_node's method
             self.parent_node.command_hover_at_current_local_position()
             goal_handle.abort()
@@ -213,7 +213,7 @@ class NavigateToPointActionHandler(ActionHandlerBase):
         self.execute_feedback_timer = None
         self.execute_future = None
 
-        # Reset stored target info
+        # Reset stored target debug
         self._target_lat_deg = None
         self._target_lon_deg = None
         self._target_alt_amsl = None
@@ -236,19 +236,19 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             result.success = False
             result.message = "NavigateToPoint canceled by request."
             goal_handle.canceled()
-            self.logger.info(result.message)
+            # self.logger.debug(result.message)
         elif action_outcome and action_outcome.get("success", False):
             result.success = True
             result.message = action_outcome.get(
                 "message", "NavigateToPoint successful."
             )
             goal_handle.succeed()
-            self.logger.info(result.message)
+            # self.logger.debug(result.message)
         else:
             result.success = False
             result.message = action_outcome.get("message", "NavigateToPoint failed.")
             goal_handle.abort()
-            self.logger.error(result.message)
+            # self.logger.error(result.message)
 
         # self.parent_node.set_internal_state(InternalState.IDLE_HOVERING) # Example
         return result
@@ -271,9 +271,9 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             or self.execute_future is None
             or self.execute_future.done()
         ):
-            self.logger.warn(
-                "NavigateToPoint not properly initialized, future missing, or future done. Skipping feedback."
-            )
+            # self.logger.debug(
+            #     "NavigateToPoint not properly initialized, future missing, or future done. Skipping feedback."
+            # )
             return
 
         # --- 1. Handle Cancellation ---
@@ -285,16 +285,16 @@ class NavigateToPointActionHandler(ActionHandlerBase):
                         "message": "Navigation canceled during execution.",
                     }
                 )
-            # Hover command is usually handled in cancel_callback, but can be reinforced here if needed
+            # Hover command is usually handled in cancel_callback, but can be redebugrced here if needed
             # self.parent_node.set_target_velocity_ned(0.0, 0.0, 0.0, 0.0)
             return
 
         # --- 2. Get Current State ---
         current_global_pos = self.parent_node.get_current_global_position()
         if current_global_pos is None:
-            self.logger.warn(
-                "Cannot get current global position in feedback loop. Commanding hover."
-            )
+            # self.logger.debug(
+            #     "Cannot get current global position in feedback loop. Commanding hover."
+            # )
             # Call the parent_node's method
             self.parent_node.command_hover_at_current_local_position()
             # ... (optional: abort if GPS lost for too long) ...
@@ -302,7 +302,7 @@ class NavigateToPointActionHandler(ActionHandlerBase):
 
         # --- 3. Check Drone Status (Arm, Offboard) ---
         if not self.parent_node.is_armed() or not self.parent_node.is_offboard():
-            self.logger.error("Drone disarmed or lost offboard mode during navigation!")
+            # self.logger.error("Drone disarmed or lost offboard mode during navigation!")
             if not self.execute_future.done():
                 self.execute_future.set_result(
                     {
@@ -342,14 +342,14 @@ class NavigateToPointActionHandler(ActionHandlerBase):
         feedback_msg.current_altitude_amsl = current_alt_amsl
         feedback_msg.distance_to_target_m = distance_3d_to_target
         goal_handle.publish_feedback(feedback_msg)
-        self.logger.debug(f"Nav Feedback: DistToTarget={distance_3d_to_target:.2f}m")
+        # self.logger.debug(f"Nav Feedback: DistToTarget={distance_3d_to_target:.2f}m")
 
         # --- 6. Check for Completion ---
         if distance_3d_to_target <= self._acceptance_radius_m:
-            self.logger.info(
-                f"Target GPS point reached within acceptance radius ({self._acceptance_radius_m:.2f}m). "
-                f"Distance: {distance_3d_to_target:.2f}m."
-            )
+            # self.logger.debug(
+            #     f"Target GPS point reached within acceptance radius ({self._acceptance_radius_m:.2f}m). "
+            #     f"Distance: {distance_3d_to_target:.2f}m."
+            # )
             self.parent_node.command_hover_at_current_local_position()
             if not self.execute_future.done():
                 self.execute_future.set_result(
@@ -390,11 +390,11 @@ class NavigateToPointActionHandler(ActionHandlerBase):
             yaw_rate_cmd = 0.0
 
             self.parent_node.set_target_velocity_ned(vel_n, vel_e, vel_d, yaw_rate_cmd)
-            self.logger.debug(
-                f"Commanding Velocity NED: N={vel_n:.2f}, E={vel_e:.2f}, D={vel_d:.2f}, YawRate={yaw_rate_cmd:.2f}"
-            )
+            # self.logger.debug(
+            #     f"Commanding Velocity NED: N={vel_n:.2f}, E={vel_e:.2f}, D={vel_d:.2f}, YawRate={yaw_rate_cmd:.2f}"
+            # )
         else:
             # This case should ideally be caught by the acceptance radius check,
             # but as a final safeguard if it's extremely close.
-            self.logger.info("Effectively at target, commanding hover.")
+            self.logger.debug("Effectively at target, commanding hover.")
             self.parent_node.command_hover_at_current_local_position()

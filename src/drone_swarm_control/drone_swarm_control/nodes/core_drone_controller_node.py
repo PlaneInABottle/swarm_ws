@@ -84,7 +84,7 @@ class CoreDroneController(LifecycleNode):
         self._px4_ns_prefix: str = 'px4_1'
         self._heartbeat_period: float = DEFAULT_HEARTBEAT_PERIOD
         self._setpoint_period: float = SETPOINT_PUBLISH_PERIOD
-        self._debug_logging: bool = True # Will be set in on_configure
+        self._debug_logging: bool = False # Disabled to reduce CPU usage
 
         self._vehicle_status: Optional[VehicleStatus] = None
         self._vehicle_local_position: Optional[VehicleLocalPosition] = None
@@ -213,8 +213,9 @@ class CoreDroneController(LifecycleNode):
             self._px4_ns_prefix = str(self.get_parameter('px4_ns_prefix').value)
             self._heartbeat_period = float(self.get_parameter('offboard_heartbeat_period').value)
             self._setpoint_period = float(self.get_parameter('setpoint_publish_period').value)
-            self._debug_logging = bool(self.get_parameter('enable_debug_logging').value) # Get debug flag first!
-            self.get_logger().info(f"Parameter 'enable_debug_logging' read as: {self._debug_logging}") # Log the value immediately
+            # Debug logging disabled to reduce CPU usage
+            self._debug_logging = False
+            self.get_logger().info("Debug logging disabled to reduce CPU usage")
             self.get_logger().info(f"Params: SystemID={self._target_system_id}, Prefix='{self._px4_ns_prefix}', "
                                    f"Heartbeat={self._heartbeat_period:.3f}s, Setpoint={self._setpoint_period:.3f}s")
             if self._debug_logging: self.get_logger().debug("on_configure: Parameters retrieved.")

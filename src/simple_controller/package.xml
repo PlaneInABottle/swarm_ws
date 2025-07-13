@@ -11,6 +11,8 @@
   <exec_depend>px4_msgs</exec_depend>
   <exec_depend>swarm_interfaces</exec_depend> 
   <exec_depend>lifecycle_msgs</exec_depend> 
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
