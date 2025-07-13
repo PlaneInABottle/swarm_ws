@@ -1,4 +1,21 @@
-/build
-/install
-/log
-/src/px4_msgs
+# ROS 2 and colcon build artifacts
+build/
+install/
+log/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE configuration files
+.idea/
+.vscode/
+
+# Other
+*.swp
+*~
+
+# Submodules / external dependencies
+src/px4_msgs/

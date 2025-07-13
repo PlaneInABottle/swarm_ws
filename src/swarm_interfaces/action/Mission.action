@@ -1,0 +1,22 @@
+# Goal definition (Hedef Tanımı)
+# Görevin gerçekleştirilmesi için gönderilecek bilgiler
+
+geometry_msgs/Pose[] waypoints   # Gidilecek ara noktaların (waypoint) bir listesi
+                                 # Her bir Pose, bir konumu (x,y,z) ve yönelimi (orientation) temsil eder.
+string mission_id                # Bu görev için benzersiz bir tanımlayıcı (isteğe bağlı)
+float32 speed                    # Görev sırasında kullanılacak ortalama hız (m/s) (isteğe bağlı)
+---
+# Result definition (Sonuç Tanımı)
+# Görev tamamlandığında veya iptal edildiğinde geri gönderilecek sonuçlar
+
+bool success                     # Görev başarıyla tamamlandıysa true, aksi halde false
+string message                   # Görev yürütme hakkında bilgi mesajı (örn: "Mission completed", "Failed: Waypoint 2 unreachable")
+geometry_msgs/Pose last_waypoint_reached # Başarıyla ulaşılan son ara nokta
+---
+# Feedback definition (Geri Bildirim Tanımı)
+# Görev yürütülürken periyodik olarak gönderilecek ilerleme bilgileri
+
+geometry_msgs/Pose current_waypoint_target # Mevcut hedef ara nokta
+int32 waypoints_remaining          # Görevde kalan ara nokta sayısı
+float32 estimated_time_remaining # Görevin tamamlanması için tahmini kalan süre (saniye cinsinden)
+uint8 status                     # Mevcut görev durumu (örn: 0: NAVIGATING, 1: PAUSED, 2: APPROACHING_WAYPOINT)

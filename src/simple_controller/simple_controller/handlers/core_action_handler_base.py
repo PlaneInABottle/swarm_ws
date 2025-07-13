@@ -87,39 +87,41 @@ class ActionHandlerBase(abc.ABC):
         """
         if self._action_server is not None:
             # Use the stored logger instance
-            self.logger.warn(
-                f"[{self.__class__.__name__}] Action server '{self._action_name}' already started."
-            )
+            # self.logger.warn(
+            #     f"[{self.__class__.__name__}] Action server '{self._action_name}' already started."
+            # )
             return True  # Already started, consider it success
 
-        self.logger.info(
-            f"[{self.__class__.__name__}] Starting Action Server '{self._action_name}'..."
-        )
+        # self.logger.debug(
+        #     f"[{self.__class__.__name__}] Starting Action Server '{self._action_name}'..."
+        # )
         try:
+            full_action_name = f"{self.parent_node.get_name()}/{self._action_name}"
+
             # Change default callback groups
             self._callback_group = callback_group
             self._action_server = ActionServer(
                 node=self.parent_node,
                 action_type=self._action_type,
-                action_name=self._action_name,
-                execute_callback=self.execute_callback,
-                goal_callback=self.goal_callback,
-                handle_accepted_callback=self.handle_accepted_callback,
-                cancel_callback=self.cancel_callback,
+                action_name=full_action_name,
+                execute_callback=self.execute_callback, # 3
+                goal_callback=self.goal_callback,  # 1 validation methodumuz
+                handle_accepted_callback=self.handle_accepted_callback,  # 2
+                cancel_callback=self.cancel_callback, # optional
                 callback_group=callback_group,
             )
-            self.logger.info(
-                f"[{self.__class__.__name__}] Action Server '{self._action_name}' started successfully."
-            )
+            # self.logger.debug(
+            #     f"[{self.__class__.__name__}] Action Server '{full_action_name}' started successfully."
+            # )
 
             self._is_started = True
             return True
         except Exception as e:
             # Hnadle the other variables
-            self.logger.error(
-                f"[{self.__class__.__name__}] Failed to start Action Server '{self._action_name}': {e}"
-            )
-            self.logger.error(traceback.format_exc())
+            # self.logger.error(
+            #     f"[{self.__class__.__name__}] Failed to start Action Server '{full_action_name}': {e}"
+            # )
+            # self.logger.error(traceback.format_exc())
             self._action_server = None
             self._is_started = False
             return False
@@ -132,20 +134,21 @@ class ActionHandlerBase(abc.ABC):
         relying on garbage collection when references are removed. Setting to None helps.
         """
         if self._action_server is not None:
-            self.logger.info(
-                f"[{self.__class__.__name__}] Stopping Action Server '{self._action_name}'..."
-            )
+            # self.logger.debug(
+            #     f"[{self.__class__.__name__}] Stopping Action Server '{self._action_name}'..."
+            # )
             # TODO: Check if active goals need explicit cancellation here during stop.
             # This might depend on the desired shutdown behavior.
             self._action_server = None  # Remove reference to allow garbage collection
             self._is_started = False
-            self.logger.info(
-                f"[{self.__class__.__name__}] Action Server '{self._action_name}' stopped."
-            )
+            # self.logger.debug(
+            #     f"[{self.__class__.__name__}] Action Server '{self._action_name}' stopped."
+            # )
         else:
-            self.logger.debug(
-                f"[{self.__class__.__name__}] Action server '{self._action_name}' was not running or already stopped."
-            )
+            # self.logger.debug(
+            #     f"[{self.__class__.__name__}] Action server '{self._action_name}' was not running or already stopped."
+            # )
+            pass
 
     # --- Abstract Methods to be Implemented by Concrete Handlers ---
 
@@ -173,9 +176,9 @@ class ActionHandlerBase(abc.ABC):
         Args:
             goal_handle: The handle for the accepted goal.
         """
-        self.logger.info(
-            f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id.uuid.hex}. Starting execution..."
-        )
+        # self.logger.debug(
+        #     f"[{self.__class__.__name__}] Goal accepted: {goal_handle.goal_id.uuid.hex}. Starting execution..."
+        # )
         # NOTE: Concrete handlers MUST call parent_node.set_internal_state here
         # before calling goal_handle.execute() if using the state machine pattern.
         # Example (should be in concrete handler override or called from it):
